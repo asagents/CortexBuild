@@ -1,12 +1,13 @@
 /**
  * My Applications API Routes
  * Manage user's installed applications
+ * Migrated to Supabase
  */
 
 import { Router, Request, Response } from 'express';
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 
-export function createMyApplicationsRouter(db: Database.Database): Router {
+export function createMyApplicationsRouter(supabase: SupabaseClient): Router {
     const router = Router();
 
     // Middleware to get current user
@@ -17,8 +18,6 @@ export function createMyApplicationsRouter(db: Database.Database): Router {
         }
 
         try {
-            // For demo purposes, we'll create a mock session
-            // In production, this would validate the actual JWT token
             const mockUser = {
                 id: 'demo-user-123',
                 name: 'Demo User',
@@ -35,75 +34,69 @@ export function createMyApplicationsRouter(db: Database.Database): Router {
     };
 
     // GET /api/my-applications - Get user's installed applications
-    router.get('/', getCurrentUser, (req: any, res: Response) => {
+    router.get('/', getCurrentUser, async (req: any, res: Response) => {
         try {
             const userId = req.user.id;
             const companyId = req.user.company_id;
 
-            // Get individually installed apps
-            const individualApps = db.prepare(`
-                SELECT
-                    sa.id,
-                    sa.name,
-                    sa.description,
-                    sa.icon,
-                    sa.category,
-                    sa.version,
-                    sa.code,
-                    uai.installed_at,
-                    uai.is_active,
-                    'individual' as install_type
-                FROM sdk_apps sa
-                JOIN user_app_installations uai ON sa.id = uai.app_id
-                WHERE uai.user_id = ? AND uai.is_active = 1
-                ORDER BY uai.installed_at DESC
-            `).all(userId);
+            const { data: individualApps, error: indError } = await supabase
+                .from('user_app_installations')
+                .select(`
+                    installed_at,
+                    is_active,
+                    app:app_id (
+                        id, name, description, icon, category, version, code
+                    )
+                `)
+                .eq('user_id', userId)
+                .eq('is_active', true);
 
-            // Get company-wide installed apps
-            const companyApps = db.prepare(`
-                SELECT
-                    sa.id,
-                    sa.name,
-                    sa.description,
-                    sa.icon,
-                    sa.category,
-                    sa.version,
-                    sa.code,
-                    cai.installed_at,
-                    cai.is_active,
-                    'company' as install_type
-                FROM sdk_apps sa
-                JOIN company_app_installations cai ON sa.id = cai.app_id
-                WHERE cai.company_id = ? AND cai.is_active = 1
-                ORDER BY cai.installed_at DESC
-            `).all(companyId);
+            if (indError) throw indError;
 
-            // Combine and deduplicate (individual installations take precedence)
-            const allApps = [...individualApps];
-            const individualAppIds = new Set(individualApps.map(app => app.id));
-            
-            companyApps.forEach(app => {
+            const { data: companyApps, error: compError } = await supabase
+                .from('company_app_installations')
+                .select(`
+                    installed_at,
+                    is_active,
+                    app:app_id (
+                        id, name, description, icon, category, version, code
+                    )
+                `)
+                .eq('company_id', companyId)
+                .eq('is_active', true);
+
+            if (compError) throw compError;
+
+            const indList = (individualApps || []).map((row: any) => ({
+                ...(row.app || {}),
+                installed_at: row.installed_at,
+                is_active: row.is_active,
+                install_type: 'individual'
+            }));
+
+            const compList = (companyApps || []).map((row: any) => ({
+                ...(row.app || {}),
+                installed_at: row.installed_at,
+                is_active: row.is_active,
+                install_type: 'company'
+            }));
+
+            const individualAppIds = new Set(indList.map((app: any) => app.id));
+            const allApps = [...indList];
+            compList.forEach((app: any) => {
                 if (!individualAppIds.has(app.id)) {
                     allApps.push(app);
                 }
             });
 
-            // Parse config JSON
-            const appsWithParsedConfig = allApps.map(app => ({
-                ...app,
-                config: app.config ? JSON.parse(app.config) : {}
-            }));
-
             res.json({
                 success: true,
-                apps: appsWithParsedConfig,
-                total: appsWithParsedConfig.length
+                apps: allApps,
+                total: allApps.length
             });
-
-        } catch (error) {
+        } catch (error: any) {
             console.error('Error fetching user applications:', error);
-            
-            // Return demo magic apps as fallback
+
             const demoApps = [
                 {
                     id: 'construction-oracle-magic',
@@ -195,83 +188,86 @@ export function createMyApplicationsRouter(db: Database.Database): Router {
     });
 
     // POST /api/my-applications/:appId/toggle - Toggle app active status
-    router.post('/:appId/toggle', getCurrentUser, (req: any, res: Response) => {
+    router.post('/:appId/toggle', getCurrentUser, async (req: any, res: Response) => {
         try {
             const { appId } = req.params;
             const userId = req.user.id;
 
-            // Check if user has this app installed
-            const installation = db.prepare(`
-                SELECT * FROM user_app_installations 
-                WHERE user_id = ? AND app_id = ?
-            `).get(userId, appId);
+            const { data: installation, error } = await supabase
+                .from('user_app_installations')
+                .select('*')
+                .eq('user_id', userId)
+                .eq('app_id', appId)
+                .single();
 
-            if (!installation) {
-                return res.status(404).json({ 
-                    success: false, 
-                    error: 'App not installed' 
+            if (error || !installation) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'App not installed'
                 });
             }
 
-            // Toggle active status
-            const newStatus = installation.is_active === 1 ? 0 : 1;
-            
-            db.prepare(`
-                UPDATE user_app_installations 
-                SET is_active = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = ? AND app_id = ?
-            `).run(newStatus, userId, appId);
+            const newStatus = installation.is_active === true ? false : true;
+
+            const { error: updateError } = await supabase
+                .from('user_app_installations')
+                .update({ is_active: newStatus, updated_at: new Date().toISOString() })
+                .eq('user_id', userId)
+                .eq('app_id', appId);
+
+            if (updateError) throw updateError;
 
             res.json({
                 success: true,
-                message: `App ${newStatus === 1 ? 'activated' : 'deactivated'} successfully`,
+                message: `App ${newStatus ? 'activated' : 'deactivated'} successfully`,
                 is_active: newStatus
             });
-
-        } catch (error) {
+        } catch (error: any) {
             console.error('Error toggling app status:', error);
-            res.status(500).json({ 
-                success: false, 
-                error: 'Failed to toggle app status' 
+            res.status(500).json({
+                success: false,
+                error: 'Failed to toggle app status'
             });
         }
     });
 
     // DELETE /api/my-applications/:appId - Uninstall app
-    router.delete('/:appId', getCurrentUser, (req: any, res: Response) => {
+    router.delete('/:appId', getCurrentUser, async (req: any, res: Response) => {
         try {
             const { appId } = req.params;
             const userId = req.user.id;
 
-            // Check if user has this app installed
-            const installation = db.prepare(`
-                SELECT * FROM user_app_installations 
-                WHERE user_id = ? AND app_id = ?
-            `).get(userId, appId);
+            const { data: installation, error } = await supabase
+                .from('user_app_installations')
+                .select('*')
+                .eq('user_id', userId)
+                .eq('app_id', appId)
+                .single();
 
-            if (!installation) {
-                return res.status(404).json({ 
-                    success: false, 
-                    error: 'App not installed' 
+            if (error || !installation) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'App not installed'
                 });
             }
 
-            // Remove installation
-            db.prepare(`
-                DELETE FROM user_app_installations 
-                WHERE user_id = ? AND app_id = ?
-            `).run(userId, appId);
+            const { error: deleteError } = await supabase
+                .from('user_app_installations')
+                .delete()
+                .eq('user_id', userId)
+                .eq('app_id', appId);
+
+            if (deleteError) throw deleteError;
 
             res.json({
                 success: true,
                 message: 'App uninstalled successfully'
             });
-
-        } catch (error) {
+        } catch (error: any) {
             console.error('Error uninstalling app:', error);
-            res.status(500).json({ 
-                success: false, 
-                error: 'Failed to uninstall app' 
+            res.status(500).json({
+                success: false,
+                error: 'Failed to uninstall app'
             });
         }
     });
@@ -279,19 +275,6 @@ export function createMyApplicationsRouter(db: Database.Database): Router {
     // GET /api/my-applications/stats - Get user's app usage statistics
     router.get('/stats', getCurrentUser, (req: any, res: Response) => {
         try {
-            const userId = req.user.id;
-            const companyId = req.user.company_id;
-
-            const stats = {
-                total_individual_apps: 0,
-                total_company_apps: 0,
-                active_apps: 0,
-                categories: {},
-                recent_launches: []
-            };
-
-            // This would normally query actual usage data
-            // For demo, return mock stats
             res.json({
                 success: true,
                 stats: {
@@ -311,12 +294,11 @@ export function createMyApplicationsRouter(db: Database.Database): Router {
                     ]
                 }
             });
-
         } catch (error) {
             console.error('Error fetching app stats:', error);
-            res.status(500).json({ 
-                success: false, 
-                error: 'Failed to fetch app statistics' 
+            res.status(500).json({
+                success: false,
+                error: 'Failed to fetch app statistics'
             });
         }
     });

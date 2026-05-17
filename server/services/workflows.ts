@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface WorkflowRecord {
@@ -7,8 +7,8 @@ export interface WorkflowRecord {
   name: string;
   description: string | null;
   version: string | null;
-  definition: string;
-  is_active: number;
+  definition: string | Record<string, any>;
+  is_active: number | boolean;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -29,14 +29,22 @@ export interface WorkflowRunRecord {
   updated_at: string;
 }
 
+const safeJsonParse = (val: any): any => {
+  if (val == null) { return undefined; }
+  if (typeof val === 'string') {
+    try { return JSON.parse(val); } catch { return val; }
+  }
+  return val;
+};
+
 export const mapWorkflowRow = (row: WorkflowRecord) => ({
   id: row.id,
   companyId: row.company_id,
   name: row.name,
   description: row.description ?? '',
   version: row.version ?? '1.0.0',
-  definition: row.definition ? JSON.parse(row.definition) : {},
-  isActive: row.is_active === 1,
+  definition: safeJsonParse(row.definition) || {},
+  isActive: row.is_active === 1 || row.is_active === true,
   createdBy: row.created_by ?? undefined,
   createdAt: row.created_at,
   updatedAt: row.updated_at
@@ -47,9 +55,9 @@ export const mapWorkflowRunRow = (row: WorkflowRunRecord) => ({
   workflowId: row.workflow_id,
   companyId: row.company_id,
   status: row.status,
-  trigger: row.trigger ? JSON.parse(row.trigger) : undefined,
-  input: row.input_payload ? JSON.parse(row.input_payload) : undefined,
-  output: row.output_payload ? JSON.parse(row.output_payload) : undefined,
+  trigger: safeJsonParse(row.trigger),
+  input: safeJsonParse(row.input_payload),
+  output: safeJsonParse(row.output_payload),
   error: row.error_message ?? undefined,
   startedAt: row.started_at,
   completedAt: row.completed_at ?? undefined,
@@ -57,127 +65,141 @@ export const mapWorkflowRunRow = (row: WorkflowRunRecord) => ({
   updatedAt: row.updated_at
 });
 
-export const listWorkflows = (
-  db: Database.Database,
+export const listWorkflows = async (
+  supabase: SupabaseClient,
   companyId: string,
   includeInactive = true
 ) => {
-  const rows = db.prepare(`
-    SELECT * FROM workflows
-    WHERE company_id = ?
-      ${includeInactive ? '' : 'AND is_active = 1'}
-    ORDER BY name ASC
-  `).all(companyId) as WorkflowRecord[];
+  let query = supabase
+    .from('workflows')
+    .select('*')
+    .eq('company_id', companyId);
 
-  return rows.map(mapWorkflowRow);
+  if (!includeInactive) {
+    query = query.eq('is_active', true);
+  }
+
+  const { data: rows, error } = await query
+    .order('name', { ascending: true });
+
+  if (error) throw error;
+  return (rows || []).map((r: any) => mapWorkflowRow(r as WorkflowRecord));
 };
 
-export const listAllWorkflows = (db: Database.Database, limit = 100) => {
-  const rows = db.prepare(`
-    SELECT * FROM workflows
-    ORDER BY created_at DESC
-    LIMIT ?
-  `).all(limit) as WorkflowRecord[];
+export const listAllWorkflows = async (supabase: SupabaseClient, limit = 100) => {
+  const { data: rows, error } = await supabase
+    .from('workflows')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit);
 
-  return rows.map(mapWorkflowRow);
+  if (error) throw error;
+  return (rows || []).map((r: any) => mapWorkflowRow(r as WorkflowRecord));
 };
 
-export const getWorkflow = (db: Database.Database, workflowId: string) => {
-  const workflow = db.prepare('SELECT * FROM workflows WHERE id = ?').get(workflowId) as WorkflowRecord | undefined;
-  return workflow ? mapWorkflowRow(workflow) : undefined;
+export const getWorkflow = async (supabase: SupabaseClient, workflowId: string) => {
+  const { data: workflow, error } = await supabase
+    .from('workflows')
+    .select('*')
+    .eq('id', workflowId)
+    .single();
+
+  if (error && error.code !== 'PGRST116') throw error;
+  return workflow ? mapWorkflowRow(workflow as WorkflowRecord) : undefined;
 };
 
-export const createWorkflow = (
-  db: Database.Database,
+export const createWorkflow = async (
+  supabase: SupabaseClient,
   companyId: string,
-  payload: { name: string; description?: string; definition: any; createdBy?: string }
+  payload: { name: string; description?: string; definition?: any; createdBy?: string }
 ) => {
   const id = `wf-${uuidv4()}`;
-  db.prepare(`
-    INSERT INTO workflows (id, company_id, name, description, version, definition, is_active, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    id,
-    companyId,
-    payload.name,
-    payload.description ?? '',
-    '1.0.0',
-    JSON.stringify(payload.definition ?? {}),
-    1,
-    payload.createdBy ?? null
-  );
+  const { data: workflow, error } = await supabase
+    .from('workflows')
+    .insert({
+      id,
+      company_id: companyId,
+      name: payload.name,
+      description: payload.description ?? '',
+      version: '1.0.0',
+      definition: JSON.stringify(payload.definition ?? {}),
+      is_active: true,
+      created_by: payload.createdBy ?? null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    })
+    .select()
+    .single();
 
-  const record = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as WorkflowRecord;
-  return mapWorkflowRow(record);
+  if (error) throw error;
+  if (!workflow) throw new Error('Workflow not found after creation');
+  return mapWorkflowRow(workflow as WorkflowRecord);
 };
 
-export const updateWorkflow = (
-  db: Database.Database,
+export const updateWorkflow = async (
+  supabase: SupabaseClient,
   workflowId: string,
   companyId: string,
   updates: { name?: string; description?: string; definition?: any; version?: string; isActive?: boolean }
 ) => {
-  const fields: string[] = [];
-  const values: any[] = [];
+  const { data: existing } = await supabase
+    .from('workflows')
+    .select('id')
+    .eq('id', workflowId)
+    .eq('company_id', companyId)
+    .single();
 
-  if (updates.name !== undefined) {
-    fields.push('name = ?');
-    values.push(updates.name);
+  if (!existing) {
+    throw new Error('Workflow not found');
   }
 
-  if (updates.description !== undefined) {
-    fields.push('description = ?');
-    values.push(updates.description);
-  }
+  const dbUpdates: any = {
+    updated_at: new Date().toISOString()
+  };
 
-  if (updates.definition !== undefined) {
-    fields.push('definition = ?');
-    values.push(JSON.stringify(updates.definition));
-  }
+  if (updates.name !== undefined) dbUpdates.name = updates.name;
+  if (updates.description !== undefined) dbUpdates.description = updates.description;
+  if (updates.definition !== undefined) dbUpdates.definition = JSON.stringify(updates.definition);
+  if (updates.version !== undefined) dbUpdates.version = updates.version;
+  if (updates.isActive !== undefined) dbUpdates.is_active = updates.isActive;
 
-  if (updates.version !== undefined) {
-    fields.push('version = ?');
-    values.push(updates.version);
-  }
+  const { data: workflow, error } = await supabase
+    .from('workflows')
+    .update(dbUpdates)
+    .eq('id', workflowId)
+    .eq('company_id', companyId)
+    .select()
+    .single();
 
-  if (updates.isActive !== undefined) {
-    fields.push('is_active = ?');
-    values.push(updates.isActive ? 1 : 0);
-  }
-
-  if (fields.length === 0) {
-    return getWorkflow(db, workflowId);
-  }
-
-  fields.push('updated_at = CURRENT_TIMESTAMP');
-  values.push(workflowId, companyId);
-
-  db.prepare(`
-    UPDATE workflows
-    SET ${fields.join(', ')}
-    WHERE id = ? AND company_id = ?
-  `).run(...values);
-
-  return getWorkflow(db, workflowId);
+  if (error) throw error;
+  if (!workflow) throw new Error('Workflow not found after update');
+  return mapWorkflowRow(workflow as WorkflowRecord);
 };
 
-export const toggleWorkflow = (
-  db: Database.Database,
+export const toggleWorkflow = async (
+  supabase: SupabaseClient,
   workflowId: string,
   companyId: string,
   isActive: boolean
 ) => {
-  db.prepare(`
-    UPDATE workflows
-    SET is_active = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND company_id = ?
-  `).run(isActive ? 1 : 0, workflowId, companyId);
+  const { data: workflow, error } = await supabase
+    .from('workflows')
+    .update({
+      is_active: isActive,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', workflowId)
+    .eq('company_id', companyId)
+    .select()
+    .single();
 
-  return getWorkflow(db, workflowId);
+  if (error) throw error;
+  if (!workflow) throw new Error('Workflow not found');
+  return mapWorkflowRow(workflow as WorkflowRecord);
 };
 
-const recordWorkflowRunStep = (
-  db: Database.Database,
+const recordWorkflowRunStep = async (
+  supabase: SupabaseClient,
   runId: string,
   index: number,
   step: any,
@@ -186,66 +208,76 @@ const recordWorkflowRunStep = (
   status: string,
   error?: string
 ) => {
-  db.prepare(`
-    INSERT INTO workflow_run_steps (
-      id, run_id, step_index, step_type, name, status,
-      input_payload, output_payload, error_message, started_at, completed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-  `).run(
-    `wf-step-${uuidv4()}`,
-    runId,
-    index,
-    step.type ?? 'action',
-    step.name ?? `Step ${index + 1}`,
-    status,
-    JSON.stringify(input ?? {}),
-    JSON.stringify(output ?? {}),
-    error ?? null
-  );
+  const { error: insertErr } = await supabase
+    .from('workflow_run_steps')
+    .insert({
+      id: `wf-step-${uuidv4()}`,
+      run_id: runId,
+      step_index: index,
+      step_type: step.type ?? 'action',
+      name: step.name ?? `Step ${index + 1}`,
+      status,
+      input_payload: JSON.stringify(input ?? {}),
+      output_payload: JSON.stringify(output ?? {}),
+      error_message: error ?? null,
+      started_at: new Date().toISOString(),
+      completed_at: new Date().toISOString()
+    });
+
+  if (insertErr) throw insertErr;
 };
 
-export const runWorkflow = (
-  db: Database.Database,
+export const runWorkflow = async (
+  supabase: SupabaseClient,
   workflowId: string,
   companyId: string,
   trigger: any,
   inputPayload: any
 ) => {
-  const workflow = db.prepare('SELECT * FROM workflows WHERE id = ? AND company_id = ?')
-    .get(workflowId, companyId) as WorkflowRecord | undefined;
+  const { data: workflow, error: wfErr } = await supabase
+    .from('workflows')
+    .select('*')
+    .eq('id', workflowId)
+    .eq('company_id', companyId)
+    .single();
 
+  if (wfErr) throw wfErr;
   if (!workflow) {
     throw new Error('Workflow not found');
   }
 
-  const definition = workflow.definition ? JSON.parse(workflow.definition) : {};
+  const definitionRaw = (workflow as WorkflowRecord).definition;
+  const definition = safeJsonParse(definitionRaw) || {};
   const steps: any[] = Array.isArray(definition.steps) ? definition.steps : [];
 
   const runId = `wf-run-${uuidv4()}`;
   const startedAt = new Date().toISOString();
 
-  db.prepare(`
-    INSERT INTO workflow_runs (id, workflow_id, company_id, status, trigger, input_payload, started_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-  `).run(
-    runId,
-    workflowId,
-    companyId,
-    'running',
-    JSON.stringify(trigger ?? {}),
-    JSON.stringify(inputPayload ?? {}),
-    startedAt
-  );
+  const { error: insertErr } = await supabase
+    .from('workflow_runs')
+    .insert({
+      id: runId,
+      workflow_id: workflowId,
+      company_id: companyId,
+      status: 'running',
+      trigger: JSON.stringify(trigger ?? {}),
+      input_payload: JSON.stringify(inputPayload ?? {}),
+      started_at: startedAt,
+      created_at: startedAt,
+      updated_at: startedAt
+    });
+
+  if (insertErr) throw insertErr;
 
   let status: 'success' | 'failed' = 'success';
   let outputPayload: any = {};
   let errorMessage: string | undefined;
 
   try {
-    steps.forEach((step, index) => {
+    for (let index = 0; index < steps.length; index++) {
+      const step = steps[index];
       const stepInput = index === 0 ? inputPayload : outputPayload;
 
-      // Simulate step processing
       const stepOutput = {
         stepId: step.id ?? `step-${index + 1}`,
         message: `${step.type ?? 'action'} executed successfully`,
@@ -255,14 +287,14 @@ export const runWorkflow = (
         }
       };
 
-      recordWorkflowRunStep(db, runId, index, step, stepInput, stepOutput, 'success');
+      await recordWorkflowRunStep(supabase, runId, index, step, stepInput, stepOutput, 'success');
       outputPayload = { ...outputPayload, [`step_${index + 1}`]: stepOutput };
-    });
-  } catch (error: any) {
+    }
+  } catch (err: any) {
     status = 'failed';
-    errorMessage = error?.message ?? 'Workflow execution failed';
-    recordWorkflowRunStep(
-      db,
+    errorMessage = err?.message ?? 'Workflow execution failed';
+    await recordWorkflowRunStep(
+      supabase,
       runId,
       steps.length,
       { type: 'error-handler', name: 'Error Capture' },
@@ -273,70 +305,90 @@ export const runWorkflow = (
     );
   }
 
-  db.prepare(`
-    UPDATE workflow_runs
-    SET status = ?, output_payload = ?, error_message = ?, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(
-    status,
-    JSON.stringify(outputPayload),
-    errorMessage ?? null,
-    runId
-  );
+  const { error: updateErr } = await supabase
+    .from('workflow_runs')
+    .update({
+      status,
+      output_payload: JSON.stringify(outputPayload),
+      error_message: errorMessage ?? null,
+      completed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', runId);
 
-  const run = db.prepare('SELECT * FROM workflow_runs WHERE id = ?').get(runId) as WorkflowRunRecord;
-  return mapWorkflowRunRow(run);
+  if (updateErr) throw updateErr;
+
+  const { data: run, error: runErr } = await supabase
+    .from('workflow_runs')
+    .select('*')
+    .eq('id', runId)
+    .single();
+
+  if (runErr) throw runErr;
+  if (!run) throw new Error('Run not found after update');
+  return mapWorkflowRunRow(run as WorkflowRunRecord);
 };
 
-export const listWorkflowRuns = (
-  db: Database.Database,
+export const listWorkflowRuns = async (
+  supabase: SupabaseClient,
   workflowId: string,
   companyId: string,
   limit = 20
 ) => {
-  const rows = db.prepare(`
-    SELECT * FROM workflow_runs
-    WHERE workflow_id = ? AND company_id = ?
-    ORDER BY started_at DESC
-    LIMIT ?
-  `).all(workflowId, companyId, limit) as WorkflowRunRecord[];
+  const { data: rows, error } = await supabase
+    .from('workflow_runs')
+    .select('*')
+    .eq('workflow_id', workflowId)
+    .eq('company_id', companyId)
+    .order('started_at', { ascending: false })
+    .limit(limit);
 
-  return rows.map(mapWorkflowRunRow);
+  if (error) throw error;
+  return (rows || []).map((r: any) => mapWorkflowRunRow(r as WorkflowRunRecord));
 };
 
-export const listWorkflowRunSteps = (
-  db: Database.Database,
+export const listWorkflowRunSteps = async (
+  supabase: SupabaseClient,
   runId: string
 ) => {
-  return db.prepare(`
-    SELECT *
-    FROM workflow_run_steps
-    WHERE run_id = ?
-    ORDER BY step_index ASC
-  `).all(runId).map((row: any) => ({
+  const { data: rows, error } = await supabase
+    .from('workflow_run_steps')
+    .select('*')
+    .eq('run_id', runId)
+    .order('step_index', { ascending: true });
+
+  if (error) throw error;
+  return (rows || []).map((row: any) => ({
     id: row.id,
     runId: row.run_id,
     index: row.step_index,
     type: row.step_type,
     name: row.name,
     status: row.status,
-    input: row.input_payload ? JSON.parse(row.input_payload) : undefined,
-    output: row.output_payload ? JSON.parse(row.output_payload) : undefined,
+    input: safeJsonParse(row.input_payload),
+    output: safeJsonParse(row.output_payload),
     error: row.error_message ?? undefined,
     startedAt: row.started_at,
     completedAt: row.completed_at
   }));
 };
 
-export const listTemplates = (db: Database.Database) => {
-  return db.prepare('SELECT * FROM workflow_templates ORDER BY category, name').all().map((row: any) => ({
+export const listTemplates = async (supabase: SupabaseClient) => {
+  const { data: rows, error } = await supabase
+    .from('workflow_templates')
+    .select('*')
+    .order('category', { ascending: true })
+    .order('name', { ascending: true });
+
+  if (error) throw error;
+  return (rows || []).map((row: any) => ({
     id: row.id,
     name: row.name,
     category: row.category,
     description: row.description ?? '',
     icon: row.icon ?? '⚙️',
     difficulty: row.difficulty ?? 'intermediate',
-    definition: row.definition ? JSON.parse(row.definition) : {}
+    definition: safeJsonParse(row.definition) || {}
   }));
 };
 

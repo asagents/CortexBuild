@@ -32,8 +32,8 @@ export function createTasksRouter(supabase: SupabaseClient): Router {
         limit = 50
       } = req.query as any;
 
-      const pageNum = page;
-      const limitNum = limit;
+      const pageNum = Number(page) || 1;
+      const limitNum = Number(limit) || 50;
       const offset = (pageNum - 1) * limitNum;
 
       let query = supabase
@@ -162,15 +162,21 @@ export function createTasksRouter(supabase: SupabaseClient): Router {
         estimated_hours
       } = req.body;
 
-      const result = db.prepare(`
-        INSERT INTO tasks (
-          project_id, milestone_id, title, description, assigned_to,
-          status, priority, due_date, estimated_hours
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        project_id, milestone_id, title, description, assigned_to,
-        status, priority, due_date, estimated_hours
-      );
+      const { data: task, error } = await supabase
+        .from('tasks')
+        .insert({
+          project_id,
+          milestone_id,
+          title,
+          description,
+          assigned_to,
+          status,
+          priority,
+          due_date,
+          estimated_hours
+        })
+        .select()
+        .single();
 
       if (error) throw error;
 
@@ -211,21 +217,37 @@ export function createTasksRouter(supabase: SupabaseClient): Router {
       const { id } = req.params;
       const updates = req.body;
 
-      const { data: existing } = await supabase
+      const { data: existing, error: findError } = await supabase
         .from('tasks')
         .select('id')
         .eq('id', id)
         .single();
 
-      if (!existing) {
+      if (findError || !existing) {
         return res.status(404).json({
           success: false,
           error: 'Task not found'
         });
       }
 
-      const setClause = fields.map(field => `${field} = ?`).join(', ');
-      const values = fields.map(field => updates[field]);
+      const cleanUpdates: any = {};
+      Object.keys(updates).forEach((key) => {
+        if (updates[key] !== undefined) cleanUpdates[key] = updates[key];
+      });
+
+      if (Object.keys(cleanUpdates).length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No fields to update'
+        });
+      }
+
+      const { data: task, error } = await supabase
+        .from('tasks')
+        .update(cleanUpdates)
+        .eq('id', id)
+        .select()
+        .single();
 
       if (error) throw error;
 

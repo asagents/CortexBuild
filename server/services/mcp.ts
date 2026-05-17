@@ -1,11 +1,12 @@
 /**
  * MCP (Model Context Protocol) Service
- * 
+ *
  * Provides enhanced AI context management for better multi-turn conversations,
  * context persistence, and intelligent context retrieval.
+ * Migrated to Supabase.
  */
 
-import type { Database } from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 
 // MCP Context Types
 export interface MCPContext {
@@ -40,80 +41,35 @@ export interface MCPSession {
 }
 
 /**
- * Initialize MCP tables in database
+ * Initialize MCP tables in database (legacy noop for Supabase)
  */
-export function initializeMCPTables(db: Database.Database): void {
-  // MCP Sessions table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS mcp_sessions (
-      session_id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      context_type TEXT DEFAULT 'conversation',
-      active_contexts TEXT DEFAULT '[]',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expires_at DATETIME,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
-
-  // MCP Contexts table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS mcp_contexts (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      context_type TEXT NOT NULL,
-      context_data TEXT NOT NULL,
-      metadata TEXT DEFAULT '{}',
-      relevance_score REAL DEFAULT 1.0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expires_at DATETIME,
-      FOREIGN KEY (session_id) REFERENCES mcp_sessions(session_id) ON DELETE CASCADE,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
-
-  // MCP Messages table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS mcp_messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      content TEXT NOT NULL,
-      context_refs TEXT DEFAULT '[]',
-      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (session_id) REFERENCES mcp_sessions(session_id) ON DELETE CASCADE
-    );
-  `);
-
-  // Create indexes for better performance
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_mcp_sessions_user ON mcp_sessions(user_id);
-    CREATE INDEX IF NOT EXISTS idx_mcp_contexts_session ON mcp_contexts(session_id);
-    CREATE INDEX IF NOT EXISTS idx_mcp_contexts_user ON mcp_contexts(user_id);
-    CREATE INDEX IF NOT EXISTS idx_mcp_messages_session ON mcp_messages(session_id);
-  `);
-
-  console.log('✅ MCP tables initialized');
+export function initializeMCPTables(_supabase: SupabaseClient): void {
+  console.log('✅ MCP tables initialized (Supabase)');
 }
 
 /**
  * Create a new MCP session
  */
-export function createMCPSession(
-  db: Database.Database,
+export async function createMCPSession(
+  supabase: SupabaseClient,
   userId: string,
   contextType: string = 'conversation'
-): string {
+): Promise<string> {
   const sessionId = `mcp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24 hours
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-  db.prepare(`
-    INSERT INTO mcp_sessions (session_id, user_id, context_type, expires_at)
-    VALUES (?, ?, ?, ?)
-  `).run(sessionId, userId, contextType, expiresAt);
+  const { error } = await supabase
+    .from('mcp_sessions')
+    .insert({
+      session_id: sessionId,
+      user_id: userId,
+      context_type: contextType,
+      active_contexts: JSON.stringify([]),
+      expires_at: expiresAt,
+      last_activity: new Date().toISOString()
+    });
+
+  if (error) throw error;
 
   return sessionId;
 }
@@ -121,69 +77,75 @@ export function createMCPSession(
 /**
  * Get or create MCP session
  */
-export function getOrCreateSession(
-  db: Database.Database,
+export async function getOrCreateSession(
+  supabase: SupabaseClient,
   userId: string,
   sessionId?: string
-): string {
+): Promise<string> {
   if (sessionId) {
-    const session = db.prepare(`
-      SELECT session_id FROM mcp_sessions 
-      WHERE session_id = ? AND user_id = ? AND datetime(expires_at) > datetime('now')
-    `).get(sessionId, userId) as any;
+    const { data: session, error } = await supabase
+      .from('mcp_sessions')
+      .select('session_id')
+      .eq('session_id', sessionId)
+      .eq('user_id', userId)
+      .gt('expires_at', new Date().toISOString())
+      .single();
 
-    if (session) {
-      // Update last activity
-      db.prepare(`
-        UPDATE mcp_sessions SET last_activity = CURRENT_TIMESTAMP WHERE session_id = ?
-      `).run(sessionId);
+    if (!error && session) {
+      await supabase
+        .from('mcp_sessions')
+        .update({ last_activity: new Date().toISOString() })
+        .eq('session_id', sessionId);
       return sessionId;
     }
   }
 
-  // Create new session
-  return createMCPSession(db, userId);
+  return createMCPSession(supabase, userId);
 }
 
 /**
  * Add context to MCP session
  */
-export function addContext(
-  db: Database.Database,
+export async function addContext(
+  supabase: SupabaseClient,
   sessionId: string,
   userId: string,
   contextType: string,
   contextData: any,
   metadata: any = {}
-): string {
+): Promise<string> {
   const contextId = `ctx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-  db.prepare(`
-    INSERT INTO mcp_contexts (id, session_id, user_id, context_type, context_data, metadata, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    contextId,
-    sessionId,
-    userId,
-    contextType,
-    JSON.stringify(contextData),
-    JSON.stringify(metadata),
-    expiresAt
-  );
+  const { error: insertError } = await supabase
+    .from('mcp_contexts')
+    .insert({
+      id: contextId,
+      session_id: sessionId,
+      user_id: userId,
+      context_type: contextType,
+      context_data: JSON.stringify(contextData),
+      metadata: JSON.stringify(metadata),
+      expires_at: expiresAt
+    });
+
+  if (insertError) throw insertError;
 
   // Update session's active contexts
-  const session = db.prepare(`
-    SELECT active_contexts FROM mcp_sessions WHERE session_id = ?
-  `).get(sessionId) as any;
+  const { data: session } = await supabase
+    .from('mcp_sessions')
+    .select('active_contexts')
+    .eq('session_id', sessionId)
+    .single();
 
   if (session) {
     const activeContexts = JSON.parse(session.active_contexts || '[]');
     activeContexts.push(contextId);
 
-    db.prepare(`
-      UPDATE mcp_sessions SET active_contexts = ? WHERE session_id = ?
-    `).run(JSON.stringify(activeContexts), sessionId);
+    await supabase
+      .from('mcp_sessions')
+      .update({ active_contexts: JSON.stringify(activeContexts) })
+      .eq('session_id', sessionId);
   }
 
   return contextId;
@@ -192,41 +154,49 @@ export function addContext(
 /**
  * Add message to MCP session
  */
-export function addMessage(
-  db: Database.Database,
+export async function addMessage(
+  supabase: SupabaseClient,
   sessionId: string,
   role: 'system' | 'user' | 'assistant',
   content: string,
   contextRefs: string[] = []
-): void {
-  db.prepare(`
-    INSERT INTO mcp_messages (session_id, role, content, context_refs)
-    VALUES (?, ?, ?, ?)
-  `).run(sessionId, role, content, JSON.stringify(contextRefs));
+): Promise<void> {
+  const { error: insertError } = await supabase
+    .from('mcp_messages')
+    .insert({
+      session_id: sessionId,
+      role,
+      content,
+      context_refs: JSON.stringify(contextRefs)
+    });
+
+  if (insertError) throw insertError;
 
   // Update session last activity
-  db.prepare(`
-    UPDATE mcp_sessions SET last_activity = CURRENT_TIMESTAMP WHERE session_id = ?
-  `).run(sessionId);
+  await supabase
+    .from('mcp_sessions')
+    .update({ last_activity: new Date().toISOString() })
+    .eq('session_id', sessionId);
 }
 
 /**
  * Get session messages with context
  */
-export function getSessionMessages(
-  db: Database.Database,
+export async function getSessionMessages(
+  supabase: SupabaseClient,
   sessionId: string,
   limit: number = 50
-): MCPMessage[] {
-  const messages = db.prepare(`
-    SELECT role, content, context_refs, timestamp
-    FROM mcp_messages
-    WHERE session_id = ?
-    ORDER BY timestamp DESC
-    LIMIT ?
-  `).all(sessionId, limit) as any[];
+): Promise<MCPMessage[]> {
+  const { data: messages, error } = await supabase
+    .from('mcp_messages')
+    .select('role, content, context_refs, timestamp')
+    .eq('session_id', sessionId)
+    .order('timestamp', { ascending: false })
+    .limit(limit);
 
-  return messages.reverse().map(msg => ({
+  if (error) throw error;
+
+  return (messages || []).reverse().map((msg: any) => ({
     role: msg.role,
     content: msg.content,
     timestamp: msg.timestamp,
@@ -237,28 +207,28 @@ export function getSessionMessages(
 /**
  * Get relevant contexts for a session
  */
-export function getRelevantContexts(
-  db: Database.Database,
+export async function getRelevantContexts(
+  supabase: SupabaseClient,
   sessionId: string,
   contextType?: string
-): MCPContext[] {
-  let query = `
-    SELECT id, user_id, session_id, context_type, context_data, metadata, relevance_score
-    FROM mcp_contexts
-    WHERE session_id = ? AND datetime(expires_at) > datetime('now')
-  `;
-  const params: any[] = [sessionId];
+): Promise<MCPContext[]> {
+  let query = supabase
+    .from('mcp_contexts')
+    .select('id, user_id, session_id, context_type, context_data, metadata, relevance_score, created_at')
+    .eq('session_id', sessionId)
+    .gt('expires_at', new Date().toISOString());
 
   if (contextType) {
-    query += ` AND context_type = ?`;
-    params.push(contextType);
+    query = query.eq('context_type', contextType);
   }
 
-  query += ` ORDER BY relevance_score DESC, created_at DESC`;
+  const { data: contexts, error } = await query
+    .order('relevance_score', { ascending: false })
+    .order('created_at', { ascending: false });
 
-  const contexts = db.prepare(query).all(...params) as any[];
+  if (error) throw error;
 
-  return contexts.map(ctx => ({
+  return (contexts || []).map((ctx: any) => ({
     id: ctx.id,
     user_id: ctx.user_id,
     session_id: ctx.session_id,
@@ -271,27 +241,21 @@ export function getRelevantContexts(
 /**
  * Build enhanced prompt with MCP context
  */
-export function buildEnhancedPrompt(
-  db: Database.Database,
+export async function buildEnhancedPrompt(
+  supabase: SupabaseClient,
   sessionId: string,
   userMessage: string,
   systemPrompt?: string
-): { messages: any[], contexts: MCPContext[] } {
-  // Get session messages
-  const messages = getSessionMessages(db, sessionId, 10);
+): Promise<{ messages: any[]; contexts: MCPContext[] }> {
+  const messages = await getSessionMessages(supabase, sessionId, 10);
+  const contexts = await getRelevantContexts(supabase, sessionId);
 
-  // Get relevant contexts
-  const contexts = getRelevantContexts(db, sessionId);
+  const contextSummary = contexts
+    .map((ctx) => `[${ctx.context_type}]: ${JSON.stringify(ctx.context_data)}`)
+    .join('\n');
 
-  // Build context summary
-  const contextSummary = contexts.map(ctx => {
-    return `[${ctx.context_type}]: ${JSON.stringify(ctx.context_data)}`;
-  }).join('\n');
-
-  // Build enhanced messages array
   const enhancedMessages: any[] = [];
 
-  // Add system prompt with context
   if (systemPrompt || contextSummary) {
     enhancedMessages.push({
       role: 'system',
@@ -299,15 +263,13 @@ export function buildEnhancedPrompt(
     });
   }
 
-  // Add conversation history
-  messages.forEach(msg => {
+  messages.forEach((msg) => {
     enhancedMessages.push({
       role: msg.role,
       content: msg.content
     });
   });
 
-  // Add current user message
   enhancedMessages.push({
     role: 'user',
     content: userMessage
@@ -319,16 +281,11 @@ export function buildEnhancedPrompt(
 /**
  * Clean up expired sessions and contexts
  */
-export function cleanupExpiredSessions(db: Database.Database): void {
-  // Delete expired contexts
-  db.prepare(`
-    DELETE FROM mcp_contexts WHERE datetime(expires_at) <= datetime('now')
-  `).run();
+export async function cleanupExpiredSessions(supabase: SupabaseClient): Promise<void> {
+  const now = new Date().toISOString();
 
-  // Delete expired sessions
-  db.prepare(`
-    DELETE FROM mcp_sessions WHERE datetime(expires_at) <= datetime('now')
-  `).run();
+  await supabase.from('mcp_contexts').delete().lte('expires_at', now);
+  await supabase.from('mcp_sessions').delete().lte('expires_at', now);
 
   console.log('✅ MCP cleanup completed');
 }
@@ -336,32 +293,52 @@ export function cleanupExpiredSessions(db: Database.Database): void {
 /**
  * Get session statistics
  */
-export function getSessionStats(
-  db: Database.Database,
-  userId: string
-): any {
-  const stats = db.prepare(`
-    SELECT 
-      COUNT(DISTINCT session_id) as total_sessions,
-      COUNT(*) as total_messages,
-      MAX(last_activity) as last_activity
-    FROM mcp_sessions s
-    LEFT JOIN mcp_messages m ON s.session_id = m.session_id
-    WHERE s.user_id = ?
-  `).get(userId);
+export async function getSessionStats(supabase: SupabaseClient, userId: string): Promise<any> {
+  const { data: sessions, error: sessionsError } = await supabase
+    .from('mcp_sessions')
+    .select('session_id, last_activity')
+    .eq('user_id', userId);
 
-  const contextStats = db.prepare(`
-    SELECT 
-      context_type,
-      COUNT(*) as count
-    FROM mcp_contexts
-    WHERE user_id = ? AND datetime(expires_at) > datetime('now')
-    GROUP BY context_type
-  `).all(userId);
+  if (sessionsError) throw sessionsError;
+
+  const sessionIds = (sessions || []).map((s: any) => s.session_id);
+
+  let totalMessages = 0;
+  let lastActivity = null;
+
+  if (sessionIds.length > 0) {
+    const { data: messages, error: messagesError } = await supabase
+      .from('mcp_messages')
+      .select('timestamp')
+      .in('session_id', sessionIds);
+
+    if (messagesError) throw messagesError;
+
+    totalMessages = (messages || []).length;
+    const timestamps = (messages || []).map((m: any) => m.timestamp).filter(Boolean);
+    if (timestamps.length > 0) {
+      lastActivity = timestamps.sort().pop();
+    }
+  }
+
+  const { data: contextStats, error: contextError } = await supabase
+    .from('mcp_contexts')
+    .select('context_type')
+    .eq('user_id', userId)
+    .gt('expires_at', new Date().toISOString());
+
+  if (contextError) throw contextError;
+
+  const contextsByType = (contextStats || []).reduce((acc: any, ctx: any) => {
+    const type = ctx.context_type || 'unknown';
+    acc[type] = (acc[type] || 0) + 1;
+    return acc;
+  }, {});
 
   return {
-    ...stats,
-    contexts_by_type: contextStats
+    total_sessions: sessionIds.length,
+    total_messages: totalMessages,
+    last_activity: lastActivity,
+    contexts_by_type: contextsByType
   };
 }
-

@@ -1,7 +1,8 @@
 // CortexBuild Webhooks Service
 // Real-time event notifications to external systems
+// Migrated to Supabase
 
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 import axios from 'axios';
 import crypto from 'crypto';
 
@@ -67,85 +68,125 @@ export const WEBHOOK_EVENTS = {
 /**
  * Create a new webhook
  */
-export function createWebhook(
-  db: Database.Database,
+export async function createWebhook(
+  supabase: SupabaseClient,
   userId: string,
   companyId: string,
   name: string,
   url: string,
   events: string[]
-): Webhook {
-  // Generate webhook secret
+): Promise<Webhook> {
   const secret = crypto.randomBytes(32).toString('hex');
 
-  const result = db.prepare(`
-    INSERT INTO webhooks (user_id, company_id, name, url, events, secret, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, 1)
-  `).run(userId, companyId, name, url, JSON.stringify(events), secret);
+  const { data, error } = await supabase
+    .from('webhooks')
+    .insert({
+      user_id: userId,
+      company_id: companyId,
+      name,
+      url,
+      events: JSON.stringify(events),
+      secret,
+      is_active: true,
+      success_count: 0,
+      failure_count: 0
+    })
+    .select()
+    .single();
 
-  return getWebhook(db, Number(result.lastInsertRowid));
+  if (error) throw error;
+  return data as Webhook;
 }
 
 /**
  * Get webhook by ID
  */
-export function getWebhook(db: Database.Database, webhookId: number): Webhook {
-  return db.prepare('SELECT * FROM webhooks WHERE id = ?').get(webhookId) as Webhook;
+export async function getWebhook(
+  supabase: SupabaseClient,
+  webhookId: number
+): Promise<Webhook | null> {
+  const { data, error } = await supabase
+    .from('webhooks')
+    .select('*')
+    .eq('id', webhookId)
+    .single();
+
+  if (error) throw error;
+  return data as Webhook | null;
 }
 
 /**
  * Get all webhooks for a user
  */
-export function getUserWebhooks(db: Database.Database, userId: string): Webhook[] {
-  return db.prepare('SELECT * FROM webhooks WHERE user_id = ? ORDER BY created_at DESC').all(userId) as Webhook[];
+export async function getUserWebhooks(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<Webhook[]> {
+  const { data, error } = await supabase
+    .from('webhooks')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+  return (data || []) as Webhook[];
 }
 
 /**
  * Get all webhooks for a company
  */
-export function getCompanyWebhooks(db: Database.Database, companyId: string): Webhook[] {
-  return db.prepare('SELECT * FROM webhooks WHERE company_id = ? ORDER BY created_at DESC').all(companyId) as Webhook[];
+export async function getCompanyWebhooks(
+  supabase: SupabaseClient,
+  companyId: string
+): Promise<Webhook[]> {
+  const { data, error } = await supabase
+    .from('webhooks')
+    .select('*')
+    .eq('company_id', companyId)
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+  return (data || []) as Webhook[];
 }
 
 /**
  * Update webhook
  */
-export function updateWebhook(
-  db: Database.Database,
+export async function updateWebhook(
+  supabase: SupabaseClient,
   webhookId: number,
   updates: Partial<Webhook>
-): void {
-  const fields: string[] = [];
-  const values: any[] = [];
+): Promise<void> {
+  const patch: any = {};
 
-  if (updates.name !== undefined) {
-    fields.push('name = ?');
-    values.push(updates.name);
-  }
-  if (updates.url !== undefined) {
-    fields.push('url = ?');
-    values.push(updates.url);
-  }
-  if (updates.events !== undefined) {
-    fields.push('events = ?');
-    values.push(updates.events);
-  }
-  if (updates.is_active !== undefined) {
-    fields.push('is_active = ?');
-    values.push(updates.is_active ? 1 : 0);
-  }
+  if (updates.name !== undefined) patch.name = updates.name;
+  if (updates.url !== undefined) patch.url = updates.url;
+  if (updates.events !== undefined) patch.events = updates.events;
+  if (updates.is_active !== undefined) patch.is_active = updates.is_active ? 1 : 0;
 
-  fields.push('updated_at = CURRENT_TIMESTAMP');
-  values.push(webhookId);
+  if (Object.keys(patch).length === 0) return;
 
-  db.prepare(`UPDATE webhooks SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  const { error } = await supabase
+    .from('webhooks')
+    .update(patch)
+    .eq('id', webhookId);
+
+  if (error) throw error;
 }
 
 /**
  * Delete webhook
  */
-export function deleteWebhook(db: Database.Database, webhookId: number): void {
-  db.prepare('DELETE FROM webhooks WHERE id = ?').run(webhookId);
+export async function deleteWebhook(
+  supabase: SupabaseClient,
+  webhookId: number
+): Promise<void> {
+  const { error } = await supabase
+    .from('webhooks')
+    .delete()
+    .eq('id', webhookId);
+
+  if (error) throw error;
 }
 
 /**
@@ -162,21 +203,20 @@ function generateSignature(payload: string, secret: string): string {
  * Trigger webhook
  */
 export async function triggerWebhook(
-  db: Database.Database,
+  supabase: SupabaseClient,
   webhookId: number,
   eventType: string,
   payload: any
 ): Promise<boolean> {
-  const webhook = getWebhook(db, webhookId);
+  const webhook = await getWebhook(supabase, webhookId);
 
-  if (!webhook.is_active) {
+  if (!webhook || !webhook.is_active) {
     console.log(`Webhook ${webhookId} is not active, skipping`);
     return false;
   }
 
-  // Check if webhook listens to this event
   const events = JSON.parse(webhook.events);
-  if (!events.includes(eventType) && !events.includes('*')) {
+  if (!Array.isArray(events) || (!events.includes(eventType) && !events.includes('*'))) {
     console.log(`Webhook ${webhookId} does not listen to ${eventType}, skipping`);
     return false;
   }
@@ -194,20 +234,25 @@ export async function triggerWebhook(
         'X-CortexBuild-Timestamp': timestamp.toString(),
         'X-CortexBuild-Webhook-Id': webhookId.toString()
       },
-      timeout: 10000 // 10 second timeout
+      timeout: 10000
     });
 
-    // Log successful delivery
-    logWebhookDelivery(db, webhookId, eventType, payloadStr, response.status, JSON.stringify(response.data));
+    await logWebhookDelivery(
+      supabase,
+      webhookId,
+      eventType,
+      payloadStr,
+      response.status,
+      JSON.stringify(response.data)
+    );
 
-    // Update webhook stats
-    db.prepare(`
-      UPDATE webhooks
-      SET success_count = success_count + 1,
-          last_triggered_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(webhookId);
+    await supabase
+      .from('webhooks')
+      .update({
+        success_count: (webhook.success_count || 0) + 1,
+        last_triggered_at: new Date().toISOString()
+      })
+      .eq('id', webhookId);
 
     return true;
   } catch (error: any) {
@@ -215,22 +260,31 @@ export async function triggerWebhook(
     const responseStatus = error.response?.status || 0;
     const responseBody = error.response?.data ? JSON.stringify(error.response.data) : null;
 
-    // Log failed delivery
-    logWebhookDelivery(db, webhookId, eventType, payloadStr, responseStatus, responseBody, errorMessage);
+    await logWebhookDelivery(
+      supabase,
+      webhookId,
+      eventType,
+      payloadStr,
+      responseStatus,
+      responseBody,
+      errorMessage
+    );
 
-    // Update webhook stats
-    db.prepare(`
-      UPDATE webhooks
-      SET failure_count = failure_count + 1,
-          last_triggered_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(webhookId);
+    const updatedFailureCount = (webhook.failure_count || 0) + 1;
 
-    // Disable webhook after 10 consecutive failures
-    const webhook = getWebhook(db, webhookId);
-    if (webhook.failure_count >= 10) {
-      db.prepare('UPDATE webhooks SET is_active = 0 WHERE id = ?').run(webhookId);
+    await supabase
+      .from('webhooks')
+      .update({
+        failure_count: updatedFailureCount,
+        last_triggered_at: new Date().toISOString()
+      })
+      .eq('id', webhookId);
+
+    if (updatedFailureCount >= 10) {
+      await supabase
+        .from('webhooks')
+        .update({ is_active: false })
+        .eq('id', webhookId);
       console.log(`Webhook ${webhookId} disabled after 10 consecutive failures`);
     }
 
@@ -241,54 +295,67 @@ export async function triggerWebhook(
 /**
  * Log webhook delivery
  */
-function logWebhookDelivery(
-  db: Database.Database,
+async function logWebhookDelivery(
+  supabase: SupabaseClient,
   webhookId: number,
   eventType: string,
   payload: string,
   responseStatus: number,
   responseBody: string | null,
   errorMessage?: string
-): void {
-  db.prepare(`
-    INSERT INTO webhook_logs (webhook_id, event_type, payload, response_status, response_body, error_message)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(webhookId, eventType, payload, responseStatus, responseBody, errorMessage || null);
+): Promise<void> {
+  const { error } = await supabase
+    .from('webhook_logs')
+    .insert({
+      webhook_id: webhookId,
+      event_type: eventType,
+      payload,
+      response_status: responseStatus,
+      response_body: responseBody,
+      error_message: errorMessage || null
+    });
+
+  if (error) throw error;
 }
 
 /**
  * Get webhook logs
  */
-export function getWebhookLogs(
-  db: Database.Database,
+export async function getWebhookLogs(
+  supabase: SupabaseClient,
   webhookId: number,
   limit: number = 50
-): any[] {
-  return db.prepare(`
-    SELECT * FROM webhook_logs
-    WHERE webhook_id = ?
-    ORDER BY delivered_at DESC
-    LIMIT ?
-  `).all(webhookId, limit);
+): Promise<any[]> {
+  const { data, error } = await supabase
+    .from('webhook_logs')
+    .select('*')
+    .eq('webhook_id', webhookId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+  return data || [];
 }
 
 /**
  * Trigger webhooks for an event
  */
 export async function triggerWebhooksForEvent(
-  db: Database.Database,
+  supabase: SupabaseClient,
   companyId: string,
   eventType: string,
   payload: any
 ): Promise<void> {
-  const webhooks = db.prepare(`
-    SELECT * FROM webhooks
-    WHERE company_id = ? AND is_active = 1
-  `).all(companyId) as Webhook[];
+  const { data: webhooks, error } = await supabase
+    .from('webhooks')
+    .select('*')
+    .eq('company_id', companyId)
+    .eq('is_active', true);
 
-  // Trigger all webhooks in parallel
-  const promises = webhooks.map(webhook =>
-    triggerWebhook(db, webhook.id, eventType, payload)
+  if (error) throw error;
+
+  const promises = (webhooks || []).map((webhook: any) =>
+    triggerWebhook(supabase, webhook.id, eventType, payload)
   );
 
   await Promise.allSettled(promises);
@@ -298,7 +365,7 @@ export async function triggerWebhooksForEvent(
  * Test webhook
  */
 export async function testWebhook(
-  db: Database.Database,
+  supabase: SupabaseClient,
   webhookId: number
 ): Promise<boolean> {
   const testPayload = {
@@ -307,24 +374,27 @@ export async function testWebhook(
     message: 'This is a test webhook delivery from CortexBuild'
   };
 
-  return await triggerWebhook(db, webhookId, 'webhook.test', testPayload);
+  return await triggerWebhook(supabase, webhookId, 'webhook.test', testPayload);
 }
 
 /**
  * Retry failed webhook delivery
  */
 export async function retryWebhookDelivery(
-  db: Database.Database,
+  supabase: SupabaseClient,
   logId: number
 ): Promise<boolean> {
-  const log = db.prepare('SELECT * FROM webhook_logs WHERE id = ?').get(logId) as any;
+  const { data: log, error } = await supabase
+    .from('webhook_logs')
+    .select('*')
+    .eq('id', logId)
+    .single();
 
-  if (!log) {
-    throw new Error('Webhook log not found');
-  }
+  if (error) throw error;
+  if (!log) throw new Error('Webhook log not found');
 
   const payload = JSON.parse(log.payload);
-  return await triggerWebhook(db, log.webhook_id, log.event_type, payload);
+  return await triggerWebhook(supabase, log.webhook_id, log.event_type, payload);
 }
 
 /**

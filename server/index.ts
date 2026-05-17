@@ -249,7 +249,7 @@ const startServer = async () => {
 
         // Initialize subscription service
         console.log('💳 Initializing Subscription service...');
-        const subscriptionService = createSubscriptionService(db);
+        const subscriptionService = createSubscriptionService(supabase);
 
         // Register Auth routes
         console.log('🔐 Registering Auth routes...');
@@ -350,7 +350,7 @@ const startServer = async () => {
         app.use('/api/clients', generalRateLimit, clientsRouter);
         console.log('  ✓ /api/clients');
 
-        app.use('/api/projects', generalRateLimit, createProjectsRouter(db));
+        app.use('/api/projects', generalRateLimit, createProjectsRouter(supabase));
         console.log('  ✓ /api/projects');
 
         app.use('/api/rfis', generalRateLimit, createRFIsRouter(db));
@@ -395,7 +395,7 @@ const startServer = async () => {
         app.use('/api/smart-tools', generalRateLimit, createSmartToolsRouter(db));
         console.log('  ✓ /api/smart-tools');
 
-        app.use('/api/sdk', generalRateLimit, createSDKRouter(db));
+        app.use('/api/sdk', generalRateLimit, createSDKRouter(supabase));
         console.log('  ✓ /api/sdk');
 
         app.use('/api/admin/sdk', adminRateLimit, adminSDKRouter);
@@ -413,10 +413,10 @@ const startServer = async () => {
         app.use('/api/integrations', generalRateLimit, createIntegrationsRouter(db));
         console.log('  ✓ /api/integrations');
 
-        app.use('/api/agentkit', generalRateLimit, createAgentKitRouter(db));
+        app.use('/api/agentkit', generalRateLimit, createAgentKitRouter(supabase));
         console.log('  ✓ /api/agentkit');
 
-        app.use('/api/workflows', generalRateLimit, createWorkflowsRouter(db));
+        app.use('/api/workflows', generalRateLimit, createWorkflowsRouter(supabase));
         console.log('  ✓ /api/workflows');
 
         app.use('/api/automations', generalRateLimit, createAutomationsRouter(db));

@@ -681,7 +681,7 @@ export function createAdminRouter(supabase: SupabaseClient): Router {
   });
 
   // GET /api/admin/stats - System statistics (Super Admin) - Alias for dashboard
-  router.get('/stats', requireSuperAdmin, (req: Request, res: Response) => {
+  router.get('/stats', requireSuperAdmin, async (req: Request, res: Response) => {
     try {
       const now = new Date();
       const weekAgo = new Date(now);
@@ -691,27 +691,23 @@ export function createAdminRouter(supabase: SupabaseClient): Router {
       const weekAgoIso = weekAgo.toISOString();
       const startOfMonthIso = startOfMonth.toISOString();
 
-      const getCount = (query: string, ...params: any[]) => {
-        try {
-          const row = db.prepare(query).get(...params) as any;
-          return row?.count ?? 0;
-        } catch (error) {
-          console.warn('[Admin stats] count query failed', query, error);
-          return 0;
-        }
-      };
+      const [usersResult, activeUsersResult, companiesResult, projectsResult, apiResult, errorResult] = await Promise.all([
+        supabase.from('users').select('*', { count: 'exact', head: true }),
+        supabase.from('users').select('*', { count: 'exact', head: true }).eq('is_active', true),
+        supabase.from('companies').select('*', { count: 'exact', head: true }),
+        supabase.from('projects').select('*', { count: 'exact', head: true }),
+        supabase.from('api_usage_logs').select('*', { count: 'exact', head: true }).gte('created_at', new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString()),
+        supabase.from('activities').select('*', { count: 'exact', head: true }).eq('action', 'error').gte('created_at', new Date(now.getTime() - 60 * 60 * 1000).toISOString())
+      ]);
 
-      const totalUsers = getCount('SELECT COUNT(*) as count FROM users');
-      const activeUsers = getCount('SELECT COUNT(*) as count FROM users WHERE is_active = 1');
-      const totalCompanies = getCount('SELECT COUNT(*) as count FROM companies');
-      const totalProjects = getCount('SELECT COUNT(*) as count FROM projects');
+      const totalUsers = usersResult.count || 0;
+      const activeUsers = activeUsersResult.count || 0;
+      const totalCompanies = companiesResult.count || 0;
+      const totalProjects = projectsResult.count || 0;
+      const apiCalls24h = apiResult.count || 0;
+      const recentErrors = errorResult.count || 0;
 
-      // Get API usage for last 24 hours
-      const apiCalls24h = getCount('SELECT COUNT(*) as count FROM api_usage_logs WHERE created_at > datetime("now", "-1 day")');
-
-      // Determine system health based on recent activity and errors
       let systemHealth = 'healthy';
-      const recentErrors = getCount('SELECT COUNT(*) as count FROM activities WHERE action = "error" AND created_at > datetime("now", "-1 hour")');
       if (recentErrors > 5) {
         systemHealth = 'critical';
       } else if (recentErrors > 2) {

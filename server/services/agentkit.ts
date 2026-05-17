@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface AgentRecord {
@@ -10,11 +10,11 @@ export interface AgentRecord {
   description: string | null;
   icon: string | null;
   status: string;
-  is_global: number;
-  tags?: string | null;
-  capabilities?: string | null;
-  config?: string | null;
-  metadata?: string | null;
+  is_global: boolean | number;
+  tags?: string | any[] | null;
+  capabilities?: string | Record<string, any> | null;
+  config?: string | Record<string, any> | null;
+  metadata?: string | Record<string, any> | null;
   created_at: string;
   updated_at: string;
 }
@@ -24,14 +24,22 @@ export interface AgentExecutionRecord {
   agent_id: string;
   company_id: string;
   triggered_by: string | null;
-  input_payload: string | null;
-  output_payload: string | null;
+  input_payload: string | Record<string, any> | null;
+  output_payload: string | Record<string, any> | null;
   status: string;
   duration_ms: number | null;
   error_message: string | null;
   started_at: string;
   completed_at: string | null;
 }
+
+const safeJsonParse = (val: any): any => {
+  if (val == null) return undefined;
+  if (typeof val === 'string') {
+    try { return JSON.parse(val); } catch { return val; }
+  }
+  return val;
+};
 
 const mapAgentRow = (row: AgentRecord) => ({
   id: row.id,
@@ -42,11 +50,11 @@ const mapAgentRow = (row: AgentRecord) => ({
   description: row.description ?? '',
   icon: row.icon ?? '🤖',
   status: row.status,
-  isGlobal: row.is_global === 1,
-  tags: row.tags ? JSON.parse(row.tags) : [],
-  capabilities: row.capabilities ? JSON.parse(row.capabilities) : {},
-  config: row.config ? JSON.parse(row.config) : {},
-  metadata: row.metadata ? JSON.parse(row.metadata) : {},
+  isGlobal: Boolean(row.is_global),
+  tags: safeJsonParse(row.tags) || [],
+  capabilities: safeJsonParse(row.capabilities) || {},
+  config: safeJsonParse(row.config) || {},
+  metadata: safeJsonParse(row.metadata) || {},
   createdAt: row.created_at,
   updatedAt: row.updated_at
 });
@@ -56,8 +64,8 @@ const mapExecutionRow = (row: AgentExecutionRecord) => ({
   agentId: row.agent_id,
   companyId: row.company_id,
   triggeredBy: row.triggered_by ?? undefined,
-  input: row.input_payload ? JSON.parse(row.input_payload) : undefined,
-  output: row.output_payload ? JSON.parse(row.output_payload) : undefined,
+  input: safeJsonParse(row.input_payload),
+  output: safeJsonParse(row.output_payload),
   status: row.status,
   durationMs: row.duration_ms ?? undefined,
   error: row.error_message ?? undefined,
@@ -65,37 +73,52 @@ const mapExecutionRow = (row: AgentExecutionRecord) => ({
   completedAt: row.completed_at ?? undefined
 });
 
-export const listGlobalAgents = (db: Database.Database) => {
-  const rows = db.prepare(`
-    SELECT * FROM ai_agents
-    WHERE is_global = 1
-    ORDER BY name ASC
-  `).all() as AgentRecord[];
-  return rows.map(mapAgentRow);
+export const listGlobalAgents = async (supabase: SupabaseClient) => {
+  const { data: rows, error } = await supabase
+    .from('ai_agents')
+    .select('*')
+    .eq('is_global', true)
+    .order('name', { ascending: true });
+
+  if (error) throw error;
+  return (rows || []).map(mapAgentRow);
 };
 
-export const listCompanyAgents = (db: Database.Database, companyId: string) => {
-  const rows = db.prepare(`
-    SELECT * FROM ai_agents
-    WHERE company_id = ?
-    ORDER BY name ASC
-  `).all(companyId) as AgentRecord[];
-  return rows.map(mapAgentRow);
+export const listCompanyAgents = async (supabase: SupabaseClient, companyId: string) => {
+  const { data: rows, error } = await supabase
+    .from('ai_agents')
+    .select('*')
+    .eq('company_id', companyId)
+    .order('name', { ascending: true });
+
+  if (error) throw error;
+  return (rows || []).map(mapAgentRow);
 };
 
-export const getAgentById = (db: Database.Database, agentId: string) => {
-  const agent = db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(agentId) as AgentRecord | undefined;
-  return agent ? mapAgentRow(agent) : undefined;
+export const getAgentById = async (supabase: SupabaseClient, agentId: string) => {
+  const { data: agent, error } = await supabase
+    .from('ai_agents')
+    .select('*')
+    .eq('id', agentId)
+    .single();
+
+  if (error && error.code !== 'PGRST116') throw error;
+  return agent ? mapAgentRow(agent as AgentRecord) : undefined;
 };
 
-export const subscribeAgent = (
-  db: Database.Database,
+export const subscribeAgent = async (
+  supabase: SupabaseClient,
   baseAgentId: string,
   companyId: string,
   requestedBy: string
 ) => {
-  const baseAgent = db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(baseAgentId) as AgentRecord | undefined;
+  const { data: baseAgent, error: baseErr } = await supabase
+    .from('ai_agents')
+    .select('*')
+    .eq('id', baseAgentId)
+    .single();
 
+  if (baseErr && baseErr.code !== 'PGRST116') throw baseErr;
   if (!baseAgent) {
     throw new Error('Agent not found');
   }
@@ -104,79 +127,113 @@ export const subscribeAgent = (
     throw new Error('Agent belongs to another company');
   }
 
-  const existingSubscription = db.prepare(`
-    SELECT * FROM agent_subscriptions WHERE company_id = ? AND agent_id = ?
-  `).get(companyId, baseAgentId);
+  const { data: existingSubscription } = await supabase
+    .from('agent_subscriptions')
+    .select('id')
+    .eq('company_id', companyId)
+    .eq('agent_id', baseAgentId)
+    .single();
 
   if (existingSubscription) {
-    return mapAgentRow(baseAgent);
+    return mapAgentRow(baseAgent as AgentRecord);
   }
 
-  // Clone agent for company if needed
   let agentInstanceId = baseAgent.id;
-  if (baseAgent.is_global === 1) {
+  if (baseAgent.is_global === 1 || baseAgent.is_global === true) {
     agentInstanceId = `agent-${uuidv4()}`;
     const slug = `${baseAgent.slug}-${companyId}`.toLowerCase();
 
-    db.prepare(`
-      INSERT INTO ai_agents (
-        id, slug, company_id, developer_id, name, description, icon, status,
-        is_global, tags, capabilities, config, metadata, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    `).run(
-      agentInstanceId,
-      slug,
-      companyId,
-      baseAgent.developer_id,
-      baseAgent.name,
-      baseAgent.description,
-      baseAgent.icon,
-      'active',
-      0,
-      baseAgent.tags,
-      baseAgent.capabilities,
-      baseAgent.config,
-      baseAgent.metadata
-    );
+    const { error: insertErr } = await supabase
+      .from('ai_agents')
+      .insert({
+        id: agentInstanceId,
+        slug,
+        company_id: companyId,
+        developer_id: baseAgent.developer_id,
+        name: baseAgent.name,
+        description: baseAgent.description,
+        icon: baseAgent.icon,
+        status: 'active',
+        is_global: false,
+        tags: baseAgent.tags,
+        capabilities: baseAgent.capabilities,
+        config: baseAgent.config,
+        metadata: baseAgent.metadata,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      });
+
+    if (insertErr) throw insertErr;
   }
 
   const nowIso = new Date().toISOString();
-  db.prepare(`
-    INSERT INTO agent_subscriptions (id, company_id, agent_id, status, seats, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    `sub-${agentInstanceId}`,
-    companyId,
-    agentInstanceId,
-    'active',
-    25,
-    nowIso,
-    nowIso
-  );
+  const { error: subErr } = await supabase
+    .from('agent_subscriptions')
+    .insert({
+      id: `sub-${agentInstanceId}`,
+      company_id: companyId,
+      agent_id: agentInstanceId,
+      status: 'active',
+      seats: 25,
+      created_at: nowIso,
+      updated_at: nowIso
+    });
 
-  // Record audit event in developer console for observability
-  logDeveloperEvent(db, requestedBy, companyId, 'agent.subscribe', {
+  if (subErr) throw subErr;
+
+  await logDeveloperEvent(supabase, requestedBy, companyId, 'agent.subscribe', {
     agentId: agentInstanceId,
     baseAgentId
   });
 
-  const agent = db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(agentInstanceId) as AgentRecord;
-  return mapAgentRow(agent);
+  const { data: agent, error: agentErr } = await supabase
+    .from('ai_agents')
+    .select('*')
+    .eq('id', agentInstanceId)
+    .single();
+
+  if (agentErr) throw agentErr;
+  if (!agent) throw new Error('Agent not found after creation');
+  return mapAgentRow(agent as AgentRecord);
 };
 
-export const unsubscribeAgent = (
-  db: Database.Database,
+export const unsubscribeAgent = async (
+  supabase: SupabaseClient,
   agentId: string,
   companyId: string
 ) => {
-  const agent = db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(agentId) as AgentRecord | undefined;
+  const { data: agent, error: agentErr } = await supabase
+    .from('ai_agents')
+    .select('*')
+    .eq('id', agentId)
+    .single();
+
+  if (agentErr && agentErr.code !== 'PGRST116') throw agentErr;
   if (!agent || agent.company_id !== companyId) {
     throw new Error('Agent not found for this company');
   }
 
-  db.prepare('DELETE FROM agent_subscriptions WHERE company_id = ? AND agent_id = ?').run(companyId, agentId);
-  db.prepare('DELETE FROM agent_executions WHERE agent_id = ?').run(agentId);
-  db.prepare('DELETE FROM ai_agents WHERE id = ?').run(agentId);
+  const { error: delSubErr } = await supabase
+    .from('agent_subscriptions')
+    .delete()
+    .eq('company_id', companyId)
+    .eq('agent_id', agentId);
+
+  if (delSubErr) throw delSubErr;
+
+  const { error: delExecErr } = await supabase
+    .from('agent_executions')
+    .delete()
+    .eq('agent_id', agentId);
+
+  if (delExecErr) throw delExecErr;
+
+  const { error: delAgentErr } = await supabase
+    .from('ai_agents')
+    .delete()
+    .eq('id', agentId);
+
+  if (delAgentErr) throw delAgentErr;
 };
 
 const simulateAgentResponse = (agent: ReturnType<typeof mapAgentRow>, input: any) => {
@@ -196,15 +253,21 @@ const simulateAgentResponse = (agent: ReturnType<typeof mapAgentRow>, input: any
   };
 };
 
-export const runAgent = (
-  db: Database.Database,
+export const runAgent = async (
+  supabase: SupabaseClient,
   agentId: string,
   companyId: string,
   triggeredBy: string,
   inputPayload: any
 ) => {
-  const agentRow = db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(agentId) as AgentRecord | undefined;
-  if (!agentRow || (agentRow.company_id !== companyId && agentRow.is_global !== 1)) {
+  const { data: agentRow, error: agentErr } = await supabase
+    .from('ai_agents')
+    .select('*')
+    .eq('id', agentId)
+    .single();
+
+  if (agentErr) throw agentErr;
+  if (!agentRow || (agentRow.company_id !== companyId && !(agentRow.is_global === 1 || agentRow.is_global === true))) {
     throw new Error('Agent not accessible');
   }
 
@@ -212,77 +275,89 @@ export const runAgent = (
   const start = new Date();
   const startedAt = start.toISOString();
 
-  const resultPayload = simulateAgentResponse(mapAgentRow(agentRow), inputPayload);
+  const resultPayload = simulateAgentResponse(mapAgentRow(agentRow as AgentRecord), inputPayload);
   const completedAt = new Date().toISOString();
   const durationMs = new Date(completedAt).getTime() - start.getTime();
 
-  db.prepare(`
-    INSERT INTO agent_executions (
-      id, agent_id, company_id, triggered_by, input_payload, output_payload,
-      status, duration_ms, started_at, completed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    executionId,
-    agentId,
-    companyId,
-    triggeredBy,
-    JSON.stringify(inputPayload ?? {}),
-    JSON.stringify(resultPayload),
-    'success',
-    durationMs,
-    startedAt,
-    completedAt
-  );
+  const { error: insertErr } = await supabase
+    .from('agent_executions')
+    .insert({
+      id: executionId,
+      agent_id: agentId,
+      company_id: companyId,
+      triggered_by: triggeredBy,
+      input_payload: JSON.stringify(inputPayload ?? {}),
+      output_payload: JSON.stringify(resultPayload),
+      status: 'success',
+      duration_ms: durationMs,
+      started_at: startedAt,
+      completed_at: completedAt
+    });
 
-  logDeveloperEvent(db, triggeredBy, companyId, 'agent.execution', {
+  if (insertErr) throw insertErr;
+
+  await logDeveloperEvent(supabase, triggeredBy, companyId, 'agent.execution', {
     agentId,
     executionId,
     status: 'success'
   });
 
-  const execution = db.prepare('SELECT * FROM agent_executions WHERE id = ?').get(executionId) as AgentExecutionRecord;
-  return mapExecutionRow(execution);
+  const { data: execution, error: execErr } = await supabase
+    .from('agent_executions')
+    .select('*')
+    .eq('id', executionId)
+    .single();
+
+  if (execErr) throw execErr;
+  if (!execution) throw new Error('Execution not found after creation');
+  return mapExecutionRow(execution as AgentExecutionRecord);
 };
 
-export const getAgentExecutions = (
-  db: Database.Database,
+export const getAgentExecutions = async (
+  supabase: SupabaseClient,
   agentId: string,
   companyId: string,
   limit = 25
 ) => {
-  const rows = db.prepare(`
-    SELECT * FROM agent_executions
-    WHERE agent_id = ? AND company_id = ?
-    ORDER BY started_at DESC
-    LIMIT ?
-  `).all(agentId, companyId, limit) as AgentExecutionRecord[];
+  const { data: rows, error } = await supabase
+    .from('agent_executions')
+    .select('*')
+    .eq('agent_id', agentId)
+    .eq('company_id', companyId)
+    .order('started_at', { ascending: false })
+    .limit(limit);
 
-  return rows.map(mapExecutionRow);
+  if (error) throw error;
+  return (rows || []).map((r: any) => mapExecutionRow(r as AgentExecutionRecord));
 };
 
-export const listAgentSubscriptions = (db: Database.Database, companyId: string) => {
-  return db.prepare(`
-    SELECT * FROM agent_subscriptions
-    WHERE company_id = ?
-    ORDER BY created_at DESC
-  `).all(companyId);
+export const listAgentSubscriptions = async (supabase: SupabaseClient, companyId: string) => {
+  const { data, error } = await supabase
+    .from('agent_subscriptions')
+    .select('*')
+    .eq('company_id', companyId)
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+  return data || [];
 };
 
-const logDeveloperEvent = (
-  db: Database.Database,
+const logDeveloperEvent = async (
+  supabase: SupabaseClient,
   userId: string,
   companyId: string,
   eventType: string,
   payload: Record<string, unknown>
 ) => {
-  db.prepare(`
-    INSERT INTO developer_console_events (id, user_id, company_id, event_type, payload)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(
-    `dev-${uuidv4()}`,
-    userId,
-    companyId,
-    eventType,
-    JSON.stringify(payload)
-  );
+  const { error } = await supabase
+    .from('developer_console_events')
+    .insert({
+      id: `dev-${uuidv4()}`,
+      user_id: userId,
+      company_id: companyId,
+      event_type: eventType,
+      payload: JSON.stringify(payload)
+    });
+
+  if (error) throw error;
 };

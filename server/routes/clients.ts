@@ -28,15 +28,15 @@ export function createClientsRouter(supabase: SupabaseClient): Router {
         limit = 20
       } = req.query as any;
 
-      const pageNum = page;
-      const limitNum = limit;
+      const pageNum = Number(page) || 1;
+      const limitNum = Number(limit) || 20;
       const offset = (pageNum - 1) * limitNum;
 
       let query = supabase
         .from('clients')
         .select('*', { count: 'exact' });
 
-      if (search) {
+      if (search && typeof search === 'string') {
         query = query.or(`name.ilike.%${search}%,contact_name.ilike.%${search}%,email.ilike.%${search}%`);
       }
 
@@ -44,7 +44,6 @@ export function createClientsRouter(supabase: SupabaseClient): Router {
         query = query.eq('is_active', is_active === 'true');
       }
 
-      // Add pagination
       query = query
         .order('name')
         .range(offset, offset + limitNum - 1);
@@ -123,7 +122,7 @@ export function createClientsRouter(supabase: SupabaseClient): Router {
   });
 
   // POST /api/clients - Create new client
-  router.post('/', validateBody(createClientSchema), (req: Request, res: Response) => {
+  router.post('/', validateBody(createClientSchema), async (req: Request, res: Response) => {
     try {
       const {
         company_id,
@@ -143,21 +142,33 @@ export function createClientsRouter(supabase: SupabaseClient): Router {
         notes
       } = req.body;
 
-      const result = db.prepare(`
-        INSERT INTO clients (
-          company_id, name, contact_name, email, phone, address, city, state,
-          zip_code, country, website, tax_id, payment_terms, credit_limit, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        company_id, name, contact_name, email, phone, address, city, state,
-        zip_code, country, website, tax_id, payment_terms, credit_limit, notes
-      );
+      const { data, error } = await supabase
+        .from('clients')
+        .insert({
+          company_id,
+          name,
+          contact_name,
+          email,
+          phone,
+          address,
+          city,
+          state,
+          zip_code,
+          country,
+          website,
+          tax_id,
+          payment_terms,
+          credit_limit,
+          notes
+        })
+        .select()
+        .single();
 
       if (error) throw error;
 
       res.status(201).json({
         success: true,
-        data: client,
+        data,
         message: 'Client created successfully'
       });
     } catch (error: any) {
@@ -175,28 +186,43 @@ export function createClientsRouter(supabase: SupabaseClient): Router {
       const { id } = req.params;
       const updates = req.body;
 
-      // Check if client exists
-      const { data: existing } = await supabase
+      const { data: existing, error: findError } = await supabase
         .from('clients')
         .select('id')
         .eq('id', id)
         .single();
 
-      if (!existing) {
+      if (findError || !existing) {
         return res.status(404).json({
           success: false,
           error: 'Client not found'
         });
       }
 
-      const setClause = fields.map(field => `${field} = ?`).join(', ');
-      const values = fields.map(field => updates[field]);
+      const cleanUpdates: any = {};
+      Object.keys(updates).forEach((key) => {
+        if (updates[key] !== undefined) cleanUpdates[key] = updates[key];
+      });
+
+      if (Object.keys(cleanUpdates).length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No fields to update'
+        });
+      }
+
+      const { data, error } = await supabase
+        .from('clients')
+        .update(cleanUpdates)
+        .eq('id', id)
+        .select()
+        .single();
 
       if (error) throw error;
 
       res.json({
         success: true,
-        data: client,
+        data,
         message: 'Client updated successfully'
       });
     } catch (error: any) {
@@ -261,4 +287,3 @@ export function createClientsRouter(supabase: SupabaseClient): Router {
 
   return router;
 }
-
