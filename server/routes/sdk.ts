@@ -448,8 +448,8 @@ export const createSDKRouter = (supabase: SupabaseClient) => {
     }
   });
 
-// Get or create SDK profile (available to all authenticated users)
-router.get('/profile', authenticateToken, requireAuth, (req: Request, res: Response) => {
+  // Get or create SDK profile (available to all authenticated users)
+  router.get('/profile', authenticateToken, requireAuth, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const db = (req as any).db;
