@@ -3,7 +3,7 @@
  * Handles developer workspaces, collaboration, and project management
  */
 
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface Workspace {
@@ -38,296 +38,243 @@ export interface ProjectTemplate {
 }
 
 export class WorkspaceManager {
-  constructor(private db: Database.Database) {}
+  constructor(private supabase: SupabaseClient) {}
 
-  /**
-   * Create a new workspace
-   */
-  createWorkspace(
+  async createWorkspace(
     name: string,
     description: string,
     ownerId: string,
     isPublic: boolean = false,
     settings: any = {}
-  ): Workspace {
+  ): Promise<Workspace> {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    const stmt = this.db.prepare(`
-      INSERT INTO workspaces (id, name, description, owner_id, is_public, settings, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    const { data, error } = await this.supabase
+      .from('workspaces')
+      .insert({
+        id,
+        name,
+        description,
+        owner_id: ownerId,
+        is_public: isPublic,
+        settings: JSON.stringify(settings),
+        created_at: now,
+        updated_at: now
+      })
+      .select()
+      .single();
 
-    stmt.run(id, name, description, ownerId, isPublic ? 1 : 0, JSON.stringify(settings), now, now);
-
-    return this.getWorkspace(id)!;
+    if (error) throw error;
+    if (!data) throw new Error('Failed to create workspace');
+    return this.mapWorkspace(data);
   }
 
-  /**
-   * Get workspace by ID
-   */
-  getWorkspace(id: string): Workspace | null {
-    const stmt = this.db.prepare(`
-      SELECT * FROM workspaces WHERE id = ?
-    `);
+  async getWorkspace(id: string): Promise<Workspace | null> {
+    const { data, error } = await this.supabase
+      .from('workspaces')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-    const workspace = stmt.get(id) as any;
+    if (error && error.code !== 'PGRST116') throw error;
+    if (!data) return null;
+    return this.mapWorkspace(data);
+  }
 
+  async updateWorkspace(id: string, updates: Partial<Workspace>): Promise<Workspace | null> {
+    const workspace = await this.getWorkspace(id);
     if (!workspace) return null;
 
-    return {
-      ...workspace,
-      is_public: Boolean(workspace.is_public),
-      settings: JSON.parse(workspace.settings || '{}')
-    };
+    const patch: any = { updated_at: new Date().toISOString() };
+    if (updates.name !== undefined) patch.name = updates.name;
+    if (updates.description !== undefined) patch.description = updates.description;
+    if (updates.is_public !== undefined) patch.is_public = updates.is_public;
+    if (updates.settings !== undefined) patch.settings = JSON.stringify(updates.settings);
+
+    const { data, error } = await this.supabase
+      .from('workspaces')
+      .update(patch)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    if (!data) return null;
+    return this.mapWorkspace(data);
   }
 
-  /**
-   * Update workspace
-   */
-  updateWorkspace(id: string, updates: Partial<Workspace>): Workspace | null {
-    const workspace = this.getWorkspace(id);
-    if (!workspace) return null;
+  async deleteWorkspace(id: string): Promise<boolean> {
+    const { error } = await this.supabase
+      .from('workspaces')
+      .delete()
+      .eq('id', id);
 
-    const stmt = this.db.prepare(`
-      UPDATE workspaces
-      SET name = ?, description = ?, is_public = ?, settings = ?, updated_at = ?
-      WHERE id = ?
-    `);
-
-    stmt.run(
-      updates.name || workspace.name,
-      updates.description || workspace.description,
-      updates.is_public !== undefined ? (updates.is_public ? 1 : 0) : workspace.is_public,
-      JSON.stringify(updates.settings || workspace.settings),
-      new Date().toISOString(),
-      id
-    );
-
-    return this.getWorkspace(id);
+    if (error) throw error;
+    return true;
   }
 
-  /**
-   * Delete workspace
-   */
-  deleteWorkspace(id: string): boolean {
-    const stmt = this.db.prepare(`DELETE FROM workspaces WHERE id = ?`);
-    const result = stmt.run(id);
-    return result.changes > 0;
-  }
-
-  /**
-   * Add member to workspace
-   */
-  addWorkspaceMember(
+  async addWorkspaceMember(
     workspaceId: string,
     userId: string,
     role: WorkspaceMember['role'] = 'member',
     permissions: string[] = []
-  ): WorkspaceMember {
+  ): Promise<WorkspaceMember> {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    const stmt = this.db.prepare(`
-      INSERT INTO workspace_members (id, workspace_id, user_id, role, permissions, joined_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
+    const { data, error } = await this.supabase
+      .from('workspace_members')
+      .insert({
+        id,
+        workspace_id: workspaceId,
+        user_id: userId,
+        role,
+        permissions: JSON.stringify(permissions),
+        joined_at: now
+      })
+      .select()
+      .single();
 
-    stmt.run(id, workspaceId, userId, role, JSON.stringify(permissions), now);
-
-    return this.getWorkspaceMember(id)!;
+    if (error) throw error;
+    if (!data) throw new Error('Failed to add workspace member');
+    return this.mapMember(data);
   }
 
-  /**
-   * Get workspace member
-   */
-  getWorkspaceMember(id: string): WorkspaceMember | null {
-    const stmt = this.db.prepare(`
-      SELECT * FROM workspace_members WHERE id = ?
-    `);
+  async getWorkspaceMember(id: string): Promise<WorkspaceMember | null> {
+    const { data, error } = await this.supabase
+      .from('workspace_members')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-    const member = stmt.get(id) as any;
-
-    if (!member) return null;
-
-    return {
-      ...member,
-      permissions: JSON.parse(member.permissions || '[]')
-    };
+    if (error && error.code !== 'PGRST116') throw error;
+    if (!data) return null;
+    return this.mapMember(data);
   }
 
-  /**
-   * Get workspace members
-   */
-  getWorkspaceMembers(workspaceId: string): WorkspaceMember[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM workspace_members WHERE workspace_id = ? ORDER BY joined_at
-    `);
+  async getWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]> {
+    const { data, error } = await this.supabase
+      .from('workspace_members')
+      .select('*')
+      .eq('workspace_id', workspaceId)
+      .order('joined_at');
 
-    const members = stmt.all(workspaceId) as any[];
-
-    return members.map(member => ({
-      ...member,
-      permissions: JSON.parse(member.permissions || '[]')
-    }));
+    if (error) throw error;
+    return (data || []).map((m: any) => this.mapMember(m));
   }
 
-  /**
-   * Update member role
-   */
-  updateMemberRole(memberId: string, role: WorkspaceMember['role']): WorkspaceMember | null {
-    const stmt = this.db.prepare(`
-      UPDATE workspace_members SET role = ? WHERE id = ?
-    `);
+  async updateMemberRole(memberId: string, role: WorkspaceMember['role']): Promise<WorkspaceMember | null> {
+    const { data, error } = await this.supabase
+      .from('workspace_members')
+      .update({ role })
+      .eq('id', memberId)
+      .select()
+      .single();
 
-    stmt.run(role, memberId);
-
-    return this.getWorkspaceMember(memberId);
+    if (error) throw error;
+    if (!data) return null;
+    return this.mapMember(data);
   }
 
-  /**
-   * Remove member from workspace
-   */
-  removeWorkspaceMember(memberId: string): boolean {
-    const stmt = this.db.prepare(`DELETE FROM workspace_members WHERE id = ?`);
-    const result = stmt.run(memberId);
-    return result.changes > 0;
+  async removeWorkspaceMember(memberId: string): Promise<boolean> {
+    const { error } = await this.supabase
+      .from('workspace_members')
+      .delete()
+      .eq('id', memberId);
+
+    if (error) throw error;
+    return true;
   }
 
-  /**
-   * Create project template
-   */
-  createProjectTemplate(
+  async createProjectTemplate(
     name: string,
     description: string,
     category: string,
     templateData: any,
     createdBy: string,
     isPublic: boolean = false
-  ): ProjectTemplate {
+  ): Promise<ProjectTemplate> {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    const stmt = this.db.prepare(`
-      INSERT INTO project_templates (id, name, description, category, template_data, created_by, is_public, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    const { data, error } = await this.supabase
+      .from('project_templates')
+      .insert({
+        id,
+        name,
+        description,
+        category,
+        template_data: JSON.stringify(templateData),
+        created_by: createdBy,
+        is_public: isPublic,
+        created_at: now
+      })
+      .select()
+      .single();
 
-    stmt.run(id, name, description, category, JSON.stringify(templateData), createdBy, isPublic ? 1 : 0, now);
-
-    return this.getProjectTemplate(id)!;
+    if (error) throw error;
+    if (!data) throw new Error('Failed to create project template');
+    return this.mapTemplate(data);
   }
 
-  /**
-   * Get project template
-   */
-  getProjectTemplate(id: string): ProjectTemplate | null {
-    const stmt = this.db.prepare(`
-      SELECT * FROM project_templates WHERE id = ?
-    `);
+  async getProjectTemplate(id: string): Promise<ProjectTemplate | null> {
+    const { data, error } = await this.supabase
+      .from('project_templates')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-    const template = stmt.get(id) as any;
+    if (error && error.code !== 'PGRST116') throw error;
+    if (!data) return null;
+    return this.mapTemplate(data);
+  }
 
-    if (!template) return null;
+  async getProjectTemplates(category?: string): Promise<ProjectTemplate[]> {
+    let query = this.supabase
+      .from('project_templates')
+      .select('*')
+      .eq('is_public', true)
+      .order('created_at', { ascending: false });
 
+    if (category) {
+      query = query.eq('category', category);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+    return (data || []).map((t: any) => this.mapTemplate(t));
+  }
+
+  private mapWorkspace(row: any): Workspace {
     return {
-      ...template,
-      is_public: Boolean(template.is_public),
-      template_data: JSON.parse(template.template_data || '{}')
+      ...row,
+      is_public: Boolean(row.is_public),
+      settings: typeof row.settings === 'string' ? JSON.parse(row.settings || '{}') : (row.settings || {})
     };
   }
 
-  /**
-   * Get project templates by category
-   */
-  getProjectTemplates(category?: string): ProjectTemplate[] {
-    let query = `SELECT * FROM project_templates WHERE is_public = 1`;
-    const params: any[] = [];
-
-    if (category) {
-      query += ` AND category = ?`;
-      params.push(category);
-    }
-
-    query += ` ORDER BY created_at DESC`;
-
-    const stmt = this.db.prepare(query);
-    const templates = stmt.all(...params) as any[];
-
-    return templates.map(template => ({
-      ...template,
-      is_public: Boolean(template.is_public),
-      template_data: JSON.parse(template.template_data || '{}')
-    }));
+  private mapMember(row: any): WorkspaceMember {
+    return {
+      ...row,
+      permissions: typeof row.permissions === 'string' ? JSON.parse(row.permissions || '[]') : (row.permissions || [])
+    };
   }
 
-  /**
-   * Initialize workspace tables
-   */
-  static initTables(db: Database.Database): void {
-    // Workspaces table
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS workspaces (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        owner_id TEXT NOT NULL,
-        is_public INTEGER DEFAULT 0,
-        settings TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (owner_id) REFERENCES users(id)
-      )
-    `);
+  private mapTemplate(row: any): ProjectTemplate {
+    return {
+      ...row,
+      is_public: Boolean(row.is_public),
+      template_data: typeof row.template_data === 'string' ? JSON.parse(row.template_data || '{}') : (row.template_data || {})
+    };
+  }
 
-    // Workspace members table
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS workspace_members (
-        id TEXT PRIMARY KEY,
-        workspace_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        role TEXT DEFAULT 'member',
-        permissions TEXT,
-        joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-        UNIQUE(workspace_id, user_id)
-      )
-    `);
-
-    // Project templates table
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS project_templates (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        category TEXT NOT NULL,
-        template_data TEXT NOT NULL,
-        created_by TEXT NOT NULL,
-        is_public INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (created_by) REFERENCES users(id)
-      )
-    `);
-
-    // Workspace projects table
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS workspace_projects (
-        id TEXT PRIMARY KEY,
-        workspace_id TEXT NOT NULL,
-        project_id TEXT NOT NULL,
-        added_by TEXT NOT NULL,
-        added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-        FOREIGN KEY (added_by) REFERENCES users(id)
-      )
-    `);
-
-    console.log('✅ Workspace tables initialized');
+  static async initTables(supabase: SupabaseClient): Promise<void> {
+    // Tables should be managed via Supabase migrations; this is a no-op for runtime.
+    console.log('✅ Workspace tables managed via Supabase (initTables is a no-op at runtime)');
   }
 }
 
-export const createWorkspaceManager = (db: Database.Database): WorkspaceManager => {
-  return new WorkspaceManager(db);
+export const createWorkspaceManager = (supabase: SupabaseClient): WorkspaceManager => {
+  return new WorkspaceManager(supabase);
 };

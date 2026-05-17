@@ -1,73 +1,91 @@
 import { Router } from 'express';
-import { Database } from 'better-sqlite3';
-import * as auth from '../auth';
+import { SupabaseClient } from '@supabase/supabase-js';
+import { authenticateToken } from '../auth-supabase';
+import { v4 as uuidv4 } from 'uuid';
 
-export function createAgentsRouter(db: Database) {
+export function createAgentsRouter(supabase: SupabaseClient) {
   const router = Router();
 
   // Get all agents for the current user
-  router.get('/', auth.authenticateToken, (req, res) => {
+  router.get('/', authenticateToken, async (req, res) => {
     try {
-      const userId = (req as any).user.userId;
+      const userId = (req as any).user?.id;
+      if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-      const agents = db.prepare(`
-        SELECT
-          a.*,
-          COUNT(DISTINCT e.id) as totalRuns,
-          CAST(COUNT(CASE WHEN e.status = 'completed' THEN 1 END) AS REAL) / NULLIF(COUNT(e.id), 0) * 100 as successRate,
-          AVG(e.duration) as avgExecutionTime
-        FROM ai_agents a
-        LEFT JOIN agent_executions e ON e.agent_id = a.id
-        WHERE a.user_id = ?
-        GROUP BY a.id
-        ORDER BY a.created_at DESC
-      `).all(userId);
+      const { data: agents, error } = await supabase
+        .from('ai_agents')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
 
-      // Parse JSON fields
-      const agentsFormatted = agents.map((a: any) => ({
-        ...a,
-        config: a.config ? JSON.parse(a.config) : {},
-        totalRuns: a.totalRuns || 0,
-        successRate: Math.round(a.successRate || 0),
-        avgExecutionTime: parseFloat((a.avgExecutionTime || 0).toFixed(2))
-      }));
+      if (error) throw error;
+
+      const agentIds = (agents || []).map((a: any) => a.id);
+      let executions: any[] = [];
+      if (agentIds.length > 0) {
+        const { data: exData, error: exErr } = await supabase
+          .from('agent_executions')
+          .select('*')
+          .in('agent_id', agentIds);
+        if (!exErr) executions = exData || [];
+      }
+
+      const agentsFormatted = (agents || []).map((a: any) => {
+        const agentEx = executions.filter((e: any) => e.agent_id === a.id);
+        const totalRuns = agentEx.length;
+        const completed = agentEx.filter((e: any) => e.status === 'completed').length;
+        const successRate = totalRuns > 0 ? Math.round((completed / totalRuns) * 100) : 0;
+        const avgExecutionTime = totalRuns > 0
+          ? parseFloat((agentEx.reduce((sum: number, e: any) => sum + (e.duration || 0), 0) / totalRuns).toFixed(2))
+          : 0;
+
+        return {
+          ...a,
+          config: a.config ? (typeof a.config === 'string' ? JSON.parse(a.config) : a.config) : {},
+          totalRuns,
+          successRate,
+          avgExecutionTime
+        };
+      });
 
       res.json(agentsFormatted);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error fetching agents:', error);
       res.status(500).json({ error: 'Failed to fetch agents' });
     }
   });
 
   // Get a single agent
-  router.get('/:id', auth.authenticateToken, (req, res) => {
+  router.get('/:id', authenticateToken, async (req, res) => {
     try {
-      const userId = (req as any).user.userId;
+      const userId = (req as any).user?.id;
       const { id } = req.params;
 
-      const agent = db.prepare(`
-        SELECT * FROM ai_agents
-        WHERE id = ? AND user_id = ?
-      `).get(id, userId);
+      const { data: agent, error } = await supabase
+        .from('ai_agents')
+        .select('*')
+        .eq('id', id)
+        .eq('user_id', userId)
+        .single();
 
-      if (!agent) {
+      if (error || !agent) {
         return res.status(404).json({ error: 'Agent not found' });
       }
 
       res.json({
         ...agent,
-        config: agent.config ? JSON.parse(agent.config) : {}
+        config: agent.config ? (typeof agent.config === 'string' ? JSON.parse(agent.config) : agent.config) : {}
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error fetching agent:', error);
       res.status(500).json({ error: 'Failed to fetch agent' });
     }
   });
 
   // Create a new agent
-  router.post('/', auth.authenticateToken, (req, res) => {
+  router.post('/', authenticateToken, async (req, res) => {
     try {
-      const userId = (req as any).user.userId;
+      const userId = (req as any).user?.id;
       const { name, description, type, model, temperature, maxTokens, systemPrompt, tools } = req.body;
 
       if (!name || !type) {
@@ -82,12 +100,24 @@ export function createAgentsRouter(db: Database) {
         tools: tools || []
       };
 
-      const result = db.prepare(`
-        INSERT INTO ai_agents (user_id, name, description, type, status, config, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'active', ?, datetime('now'), datetime('now'))
-      `).run(userId, name, description, type, JSON.stringify(config));
+      const id = uuidv4();
+      const { data: agent, error } = await supabase
+        .from('ai_agents')
+        .insert({
+          id,
+          user_id: userId,
+          name,
+          description,
+          type,
+          status: 'active',
+          config: JSON.stringify(config),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .select()
+        .single();
 
-      const agent = db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(result.lastInsertRowid);
+      if (error) throw error;
 
       res.status(201).json({
         ...agent,
@@ -96,26 +126,31 @@ export function createAgentsRouter(db: Database) {
         successRate: 0,
         avgExecutionTime: 0
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error creating agent:', error);
       res.status(500).json({ error: 'Failed to create agent' });
     }
   });
 
   // Update agent
-  router.patch('/:id', auth.authenticateToken, (req, res) => {
+  router.patch('/:id', authenticateToken, async (req, res) => {
     try {
-      const userId = (req as any).user.userId;
+      const userId = (req as any).user?.id;
       const { id } = req.params;
       const { name, description, type, model, temperature, maxTokens, systemPrompt, tools } = req.body;
 
-      // Check if agent exists and belongs to user
-      const agent = db.prepare('SELECT * FROM ai_agents WHERE id = ? AND user_id = ?').get(id, userId);
-      if (!agent) {
+      const { data: existing, error: findError } = await supabase
+        .from('ai_agents')
+        .select('*')
+        .eq('id', id)
+        .eq('user_id', userId)
+        .single();
+
+      if (findError || !existing) {
         return res.status(404).json({ error: 'Agent not found' });
       }
 
-      const currentConfig = JSON.parse(agent.config);
+      const currentConfig = existing.config ? (typeof existing.config === 'string' ? JSON.parse(existing.config) : existing.config) : {};
       const newConfig = {
         model: model !== undefined ? model : currentConfig.model,
         temperature: temperature !== undefined ? temperature : currentConfig.temperature,
@@ -124,32 +159,37 @@ export function createAgentsRouter(db: Database) {
         tools: tools !== undefined ? tools : currentConfig.tools
       };
 
-      db.prepare(`
-        UPDATE ai_agents
-        SET name = COALESCE(?, name),
-            description = COALESCE(?, description),
-            type = COALESCE(?, type),
-            config = ?,
-            updated_at = datetime('now')
-        WHERE id = ? AND user_id = ?
-      `).run(name, description, type, JSON.stringify(newConfig), id, userId);
+      const updates: any = {
+        config: JSON.stringify(newConfig),
+        updated_at: new Date().toISOString()
+      };
+      if (name !== undefined) updates.name = name;
+      if (description !== undefined) updates.description = description;
+      if (type !== undefined) updates.type = type;
 
-      const updatedAgent = db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(id);
+      const { data: updatedAgent, error } = await supabase
+        .from('ai_agents')
+        .update(updates)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) throw error;
 
       res.json({
         ...updatedAgent,
-        config: JSON.parse(updatedAgent.config)
+        config: typeof updatedAgent.config === 'string' ? JSON.parse(updatedAgent.config) : updatedAgent.config
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error updating agent:', error);
       res.status(500).json({ error: 'Failed to update agent' });
     }
   });
 
   // Update agent status
-  router.patch('/:id/status', auth.authenticateToken, (req, res) => {
+  router.patch('/:id/status', authenticateToken, async (req, res) => {
     try {
-      const userId = (req as any).user.userId;
+      const userId = (req as any).user?.id;
       const { id } = req.params;
       const { status } = req.body;
 
@@ -157,50 +197,58 @@ export function createAgentsRouter(db: Database) {
         return res.status(400).json({ error: 'Invalid status' });
       }
 
-      const result = db.prepare(`
-        UPDATE ai_agents
-        SET status = ?, updated_at = datetime('now')
-        WHERE id = ? AND user_id = ?
-      `).run(status, id, userId);
+      const { data, error } = await supabase
+        .from('ai_agents')
+        .update({ status, updated_at: new Date().toISOString() })
+        .eq('id', id)
+        .eq('user_id', userId)
+        .select()
+        .single();
 
-      if (result.changes === 0) {
+      if (error || !data) {
         return res.status(404).json({ error: 'Agent not found' });
       }
 
       res.json({ message: 'Status updated successfully' });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error updating agent status:', error);
       res.status(500).json({ error: 'Failed to update status' });
     }
   });
 
   // Delete agent
-  router.delete('/:id', auth.authenticateToken, (req, res) => {
+  router.delete('/:id', authenticateToken, async (req, res) => {
     try {
-      const userId = (req as any).user.userId;
+      const userId = (req as any).user?.id;
       const { id } = req.params;
 
-      // Delete agent executions first
-      db.prepare('DELETE FROM agent_executions WHERE agent_id = ?').run(id);
+      // Delete executions first
+      await supabase.from('agent_executions').delete().eq('agent_id', id);
 
       // Delete agent
-      const result = db.prepare('DELETE FROM ai_agents WHERE id = ? AND user_id = ?').run(id, userId);
+      const { data, error } = await supabase
+        .from('ai_agents')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', userId)
+        .select()
+        .single();
 
-      if (result.changes === 0) {
+      if (error || !data) {
         return res.status(404).json({ error: 'Agent not found' });
       }
 
       res.json({ message: 'Agent deleted successfully' });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error deleting agent:', error);
       res.status(500).json({ error: 'Failed to delete agent' });
     }
   });
 
   // Execute agent
-  router.post('/:id/execute', auth.authenticateToken, async (req, res) => {
+  router.post('/:id/execute', authenticateToken, async (req, res) => {
     try {
-      const userId = (req as any).user.userId;
+      const userId = (req as any).user?.id;
       const { id } = req.params;
       const { input } = req.body;
 
@@ -208,9 +256,14 @@ export function createAgentsRouter(db: Database) {
         return res.status(400).json({ error: 'Input is required' });
       }
 
-      // Get agent
-      const agent = db.prepare('SELECT * FROM ai_agents WHERE id = ? AND user_id = ?').get(id, userId);
-      if (!agent) {
+      const { data: agent, error: agentErr } = await supabase
+        .from('ai_agents')
+        .select('*')
+        .eq('id', id)
+        .eq('user_id', userId)
+        .single();
+
+      if (agentErr || !agent) {
         return res.status(404).json({ error: 'Agent not found' });
       }
 
@@ -218,21 +271,25 @@ export function createAgentsRouter(db: Database) {
         return res.status(400).json({ error: 'Agent is not active' });
       }
 
-      const config = JSON.parse(agent.config);
+      const config = typeof agent.config === 'string' ? JSON.parse(agent.config) : (agent.config || {});
       const startTime = Date.now();
 
-      // Create execution record
-      const executionResult = db.prepare(`
-        INSERT INTO agent_executions (agent_id, status, input, started_at)
-        VALUES (?, 'running', ?, datetime('now'))
-      `).run(id, input);
+      const executionId = uuidv4();
+      const { data: execution, error: execErr } = await supabase
+        .from('agent_executions')
+        .insert({
+          id: executionId,
+          agent_id: id,
+          status: 'running',
+          input,
+          started_at: new Date().toISOString()
+        })
+        .select()
+        .single();
 
-      const executionId = executionResult.lastInsertRowid;
+      if (execErr) throw execErr;
 
       try {
-        // Execute with OpenAI (you'll need to import your AI service)
-        const aiService = await import('../services/ai');
-
         const messages = [
           { role: 'system', content: config.systemPrompt || 'You are a helpful AI assistant.' },
           { role: 'user', content: input }
@@ -260,103 +317,113 @@ export function createAgentsRouter(db: Database) {
         const output = data.choices[0].message.content;
         const tokensUsed = data.usage.total_tokens;
         const duration = (Date.now() - startTime) / 1000;
+        const cost = (tokensUsed / 1000) * 0.01;
 
-        // Calculate cost (approximate)
-        const cost = (tokensUsed / 1000) * 0.01; // $0.01 per 1K tokens
+        await supabase
+          .from('agent_executions')
+          .update({
+            status: 'completed',
+            output,
+            completed_at: new Date().toISOString(),
+            duration,
+            tokens_used: tokensUsed,
+            cost
+          })
+          .eq('id', executionId);
 
-        // Update execution record
-        db.prepare(`
-          UPDATE agent_executions
-          SET status = 'completed',
-              output = ?,
-              completed_at = datetime('now'),
-              duration = ?,
-              tokens_used = ?,
-              cost = ?
-          WHERE id = ?
-        `).run(output, duration, tokensUsed, cost, executionId);
+        await supabase
+          .from('ai_agents')
+          .update({ last_run: new Date().toISOString() })
+          .eq('id', id);
 
-        // Update agent last_run
-        db.prepare(`
-          UPDATE ai_agents
-          SET last_run = datetime('now')
-          WHERE id = ?
-        `).run(id);
+        const { data: updatedExec } = await supabase
+          .from('agent_executions')
+          .select('*')
+          .eq('id', executionId)
+          .single();
 
-        const execution = db.prepare('SELECT * FROM agent_executions WHERE id = ?').get(executionId);
-        res.json(execution);
-
+        res.json(updatedExec);
       } catch (error: any) {
         const duration = (Date.now() - startTime) / 1000;
 
-        // Update execution with error
-        db.prepare(`
-          UPDATE agent_executions
-          SET status = 'failed',
-              error = ?,
-              completed_at = datetime('now'),
-              duration = ?
-          WHERE id = ?
-        `).run(error.message, duration, executionId);
+        await supabase
+          .from('agent_executions')
+          .update({
+            status: 'failed',
+            error: error.message,
+            completed_at: new Date().toISOString(),
+            duration
+          })
+          .eq('id', executionId);
 
-        // Update agent status
-        db.prepare(`
-          UPDATE ai_agents
-          SET status = 'error',
-              last_run = datetime('now')
-          WHERE id = ?
-        `).run(id);
+        await supabase
+          .from('ai_agents')
+          .update({ status: 'error', last_run: new Date().toISOString() })
+          .eq('id', id);
 
         throw error;
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error executing agent:', error);
       res.status(500).json({ error: 'Failed to execute agent' });
     }
   });
 
-  // Get agent executions
-  router.get('/executions', auth.authenticateToken, (req, res) => {
+  // Get agent executions for user
+  router.get('/executions', authenticateToken, async (req, res) => {
     try {
-      const userId = (req as any).user.userId;
+      const userId = (req as any).user?.id;
 
-      const executions = db.prepare(`
-        SELECT e.*, a.name as agent_name
-        FROM agent_executions e
-        JOIN ai_agents a ON a.id = e.agent_id
-        WHERE a.user_id = ?
-        ORDER BY e.started_at DESC
-        LIMIT 100
-      `).all(userId);
+      const { data: executions, error } = await supabase
+        .from('agent_executions')
+        .select('*, ai_agents!inner(name)')
+        .eq('ai_agents.user_id', userId)
+        .order('started_at', { ascending: false })
+        .limit(100);
 
-      res.json(executions);
-    } catch (error) {
+      if (error) throw error;
+
+      const formatted = (executions || []).map((e: any) => {
+        const agent_name = e.ai_agents?.name || '';
+        delete e.ai_agents;
+        return { ...e, agent_name };
+      });
+
+      res.json(formatted);
+    } catch (error: any) {
       console.error('Error fetching executions:', error);
       res.status(500).json({ error: 'Failed to fetch executions' });
     }
   });
 
   // Get executions for a specific agent
-  router.get('/:id/executions', auth.authenticateToken, (req, res) => {
+  router.get('/:id/executions', authenticateToken, async (req, res) => {
     try {
-      const userId = (req as any).user.userId;
+      const userId = (req as any).user?.id;
       const { id } = req.params;
 
-      // Verify agent belongs to user
-      const agent = db.prepare('SELECT * FROM ai_agents WHERE id = ? AND user_id = ?').get(id, userId);
-      if (!agent) {
+      const { data: agent, error: agentErr } = await supabase
+        .from('ai_agents')
+        .select('id')
+        .eq('id', id)
+        .eq('user_id', userId)
+        .single();
+
+      if (agentErr || !agent) {
         return res.status(404).json({ error: 'Agent not found' });
       }
 
-      const executions = db.prepare(`
-        SELECT * FROM agent_executions
-        WHERE agent_id = ?
-        ORDER BY started_at DESC
-        LIMIT 50
-      `).all(id);
+      const { data: executions, error } = await supabase
+        .from('agent_executions')
+        .select('*')
+        .eq('agent_id', id)
+        .order('started_at', { ascending: false })
+        .limit(50);
 
-      res.json(executions);
-    } catch (error) {
+      if (error) throw error;
+
+      res.json(executions || []);
+    } catch (error: any) {
       console.error('Error fetching agent executions:', error);
       res.status(500).json({ error: 'Failed to fetch executions' });
     }

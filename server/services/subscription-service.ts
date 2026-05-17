@@ -3,7 +3,7 @@
  * Handles billing, payment processing, and subscription lifecycle
  */
 
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 import Stripe from 'stripe';
 
 export interface SubscriptionPlan {
@@ -28,13 +28,9 @@ export interface SubscriptionData {
 }
 
 export class SubscriptionService {
-  private db: Database.Database;
   private stripe: Stripe;
 
-  constructor(db: Database.Database) {
-    this.db = db;
-
-    // Initialize Stripe (only if API key is provided)
+  constructor(private supabase: SupabaseClient) {
     if (process.env.STRIPE_SECRET_KEY) {
       this.stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
         apiVersion: '2024-10-28.acacia',
@@ -42,9 +38,6 @@ export class SubscriptionService {
     }
   }
 
-  /**
-   * Get all available subscription plans
-   */
   getPlans(): SubscriptionPlan[] {
     return [
       {
@@ -64,7 +57,7 @@ export class SubscriptionService {
         id: 'starter',
         name: 'Starter',
         tier: 'starter',
-        price: 2900, // $29/month
+        price: 2900,
         requests: 1000,
         features: [
           '1,000 AI requests/month',
@@ -78,7 +71,7 @@ export class SubscriptionService {
         id: 'pro',
         name: 'Professional',
         tier: 'pro',
-        price: 9900, // $99/month
+        price: 9900,
         requests: 10000,
         features: [
           '10,000 AI requests/month',
@@ -93,7 +86,7 @@ export class SubscriptionService {
         id: 'enterprise',
         name: 'Enterprise',
         tier: 'enterprise',
-        price: 29900, // $299/month
+        price: 29900,
         requests: 100000,
         features: [
           '100,000 AI requests/month',
@@ -109,20 +102,19 @@ export class SubscriptionService {
     ];
   }
 
-  /**
-   * Create or update Stripe customer
-   */
   async createStripeCustomer(userId: string, email: string, name: string): Promise<string> {
     if (!this.stripe) {
       throw new Error('Stripe not configured');
     }
 
-    const existingCustomer = this.db.prepare(`
-      SELECT stripe_customer_id FROM sdk_profiles WHERE user_id = ?
-    `).get(userId);
+    const { data: existing } = await this.supabase
+      .from('sdk_profiles')
+      .select('stripe_customer_id')
+      .eq('user_id', userId)
+      .single();
 
-    if (existingCustomer?.stripe_customer_id) {
-      return existingCustomer.stripe_customer_id;
+    if (existing?.stripe_customer_id) {
+      return existing.stripe_customer_id;
     }
 
     const customer = await this.stripe.customers.create({
@@ -131,19 +123,14 @@ export class SubscriptionService {
       metadata: { userId }
     });
 
-    // Update profile with Stripe customer ID
-    this.db.prepare(`
-      UPDATE sdk_profiles
-      SET stripe_customer_id = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ?
-    `).run(customer.id, userId);
+    await this.supabase
+      .from('sdk_profiles')
+      .update({ stripe_customer_id: customer.id, updated_at: new Date().toISOString() })
+      .eq('user_id', userId);
 
     return customer.id;
   }
 
-  /**
-   * Create Stripe subscription
-   */
   async createSubscription(
     userId: string,
     priceId: string,
@@ -153,8 +140,13 @@ export class SubscriptionService {
       throw new Error('Stripe not configured');
     }
 
-    const profile = this.db.prepare('SELECT * FROM sdk_profiles WHERE user_id = ?').get(userId);
-    if (!profile) {
+    const { data: profile, error: profileErr } = await this.supabase
+      .from('sdk_profiles')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
+
+    if (profileErr || !profile) {
       throw new Error('Profile not found');
     }
 
@@ -177,43 +169,34 @@ export class SubscriptionService {
     }
 
     const subscription = await this.stripe.subscriptions.create(subscriptionData);
-
-    // Update profile with subscription details
-    this.updateSubscriptionFromStripe(userId, subscription);
-
+    await this.updateSubscriptionFromStripe(userId, subscription);
     return subscription;
   }
 
-  /**
-   * Update subscription from Stripe webhook data
-   */
-  updateSubscriptionFromStripe(userId: string, subscription: Stripe.Subscription): void {
+  async updateSubscriptionFromStripe(userId: string, subscription: Stripe.Subscription): Promise<void> {
     const currentPeriodStart = new Date(subscription.current_period_start * 1000);
     const currentPeriodEnd = new Date(subscription.current_period_end * 1000);
 
-    this.db.prepare(`
-      UPDATE sdk_profiles
-      SET subscription_status = ?,
-          current_period_start = ?,
-          current_period_end = ?,
-          cancel_at_period_end = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ?
-    `).run(
-      subscription.status,
-      currentPeriodStart.toISOString(),
-      currentPeriodEnd.toISOString(),
-      subscription.cancel_at_period_end,
-      userId
-    );
+    await this.supabase
+      .from('sdk_profiles')
+      .update({
+        subscription_status: subscription.status,
+        current_period_start: currentPeriodStart.toISOString(),
+        current_period_end: currentPeriodEnd.toISOString(),
+        cancel_at_period_end: subscription.cancel_at_period_end,
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_id', userId);
   }
 
-  /**
-   * Cancel subscription
-   */
   async cancelSubscription(userId: string, cancelAtPeriodEnd = true): Promise<void> {
-    const profile = this.db.prepare('SELECT * FROM sdk_profiles WHERE user_id = ?').get(userId);
-    if (!profile?.stripe_customer_id) {
+    const { data: profile, error } = await this.supabase
+      .from('sdk_profiles')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
+
+    if (error || !profile?.stripe_customer_id) {
       throw new Error('No Stripe subscription found');
     }
 
@@ -221,7 +204,6 @@ export class SubscriptionService {
       throw new Error('Stripe not configured');
     }
 
-    // Get active subscriptions for customer
     const subscriptions = await this.stripe.subscriptions.list({
       customer: profile.stripe_customer_id,
       status: 'active'
@@ -241,17 +223,15 @@ export class SubscriptionService {
       await this.stripe.subscriptions.cancel(subscription.id);
     }
 
-    // Update local profile
-    this.db.prepare(`
-      UPDATE sdk_profiles
-      SET cancel_at_period_end = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ?
-    `).run(cancelAtPeriodEnd, userId);
+    await this.supabase
+      .from('sdk_profiles')
+      .update({
+        cancel_at_period_end: cancelAtPeriodEnd,
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_id', userId);
   }
 
-  /**
-   * Handle Stripe webhook events
-   */
   async handleWebhookEvent(event: Stripe.Event): Promise<void> {
     switch (event.type) {
       case 'customer.subscription.updated':
@@ -261,10 +241,8 @@ export class SubscriptionService {
         const userId = subscription.metadata?.userId;
 
         if (userId) {
-          this.updateSubscriptionFromStripe(userId, subscription);
-
-          // Record in history
-          this.recordSubscriptionChange(
+          await this.updateSubscriptionFromStripe(userId, subscription);
+          await this.recordSubscriptionChange(
             userId,
             'existing',
             subscription.status,
@@ -280,18 +258,20 @@ export class SubscriptionService {
         const invoice = event.data.object as Stripe.Invoice;
         const customerId = invoice.customer as string;
 
-        // Find user by Stripe customer ID
-        const profile = this.db.prepare(`
-          SELECT user_id FROM sdk_profiles WHERE stripe_customer_id = ?
-        `).get(customerId);
+        const { data: profile } = await this.supabase
+          .from('sdk_profiles')
+          .select('user_id')
+          .eq('stripe_customer_id', customerId)
+          .single();
 
         if (profile) {
-          // Reset usage or extend trial
-          this.db.prepare(`
-            UPDATE sdk_profiles
-            SET api_requests_used = 0, updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = ?
-          `).run(profile.user_id);
+          await this.supabase
+            .from('sdk_profiles')
+            .update({
+              api_requests_used: 0,
+              updated_at: new Date().toISOString()
+            })
+            .eq('user_id', profile.user_id);
         }
         break;
       }
@@ -299,20 +279,22 @@ export class SubscriptionService {
       case 'invoice.payment_failed': {
         const failedInvoice = event.data.object as Stripe.Invoice;
 
-        // Find user and mark as past_due
-        const failedProfile = this.db.prepare(`
-          SELECT user_id FROM sdk_profiles WHERE stripe_customer_id = ?
-        `).get(failedInvoice.customer);
+        const { data: failedProfile } = await this.supabase
+          .from('sdk_profiles')
+          .select('user_id')
+          .eq('stripe_customer_id', failedInvoice.customer as string)
+          .single();
 
         if (failedProfile) {
-          this.db.prepare(`
-            UPDATE sdk_profiles
-            SET subscription_status = 'past_due', updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = ?
-          `).run(failedProfile.user_id);
+          await this.supabase
+            .from('sdk_profiles')
+            .update({
+              subscription_status: 'past_due',
+              updated_at: new Date().toISOString()
+            })
+            .eq('user_id', failedProfile.user_id);
 
-          // Create notification
-          this.createNotification(
+          await this.createNotification(
             failedProfile.user_id,
             'payment_failed',
             'Payment Failed',
@@ -325,114 +307,130 @@ export class SubscriptionService {
     }
   }
 
-  /**
-   * Record subscription change in history
-   */
-  private recordSubscriptionChange(
+  private async recordSubscriptionChange(
     userId: string,
     oldTier: string,
     newTier: string,
     reason: string,
     changedBy: string,
     stripeEventId?: string
-  ): void {
+  ): Promise<void> {
     const id = `sub-history-${Date.now()}`;
-
-    this.db.prepare(`
-      INSERT INTO subscription_history (id, user_id, old_tier, new_tier, change_reason, changed_by, stripe_event_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, userId, oldTier, newTier, reason, changedBy, stripeEventId);
+    await this.supabase
+      .from('subscription_history')
+      .insert({
+        id,
+        user_id: userId,
+        old_tier: oldTier,
+        new_tier: newTier,
+        change_reason: reason,
+        changed_by: changedBy,
+        stripe_event_id: stripeEventId
+      });
   }
 
-  /**
-   * Create subscription notification
-   */
-  private createNotification(
+  private async createNotification(
     userId: string,
     type: string,
     title: string,
     message: string,
     data?: any
-  ): void {
+  ): Promise<void> {
     const id = `notif-${Date.now()}`;
-
-    this.db.prepare(`
-      INSERT INTO subscription_notifications (id, user_id, type, title, message, data)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, userId, type, title, message, data ? JSON.stringify(data) : null);
+    await this.supabase
+      .from('subscription_notifications')
+      .insert({
+        id,
+        user_id: userId,
+        type,
+        title,
+        message,
+        data: data ? JSON.stringify(data) : null
+      });
   }
 
-  /**
-   * Get subscription analytics
-   */
-  getSubscriptionAnalytics(userId?: string): any {
-    let whereClause = '';
-    let params: any[] = [];
+  async getSubscriptionAnalytics(userId?: string): Promise<any> {
+    let subscriptionsQuery = this.supabase
+      .from('sdk_profiles')
+      .select('subscription_tier, subscription_status, api_requests_used, api_requests_limit');
 
     if (userId) {
-      whereClause = 'WHERE user_id = ?';
-      params = [userId];
+      subscriptionsQuery = subscriptionsQuery.eq('user_id', userId);
     }
 
-    const subscriptions = this.db.prepare(`
-      SELECT
-        subscription_tier,
-        subscription_status,
-        COUNT(*) as count,
-        AVG(api_requests_used) as avg_usage,
-        AVG(api_requests_limit) as avg_limit
-      FROM sdk_profiles
-      ${whereClause}
-      GROUP BY subscription_tier, subscription_status
-    `).all(...params);
+    const { data: subscriptions, error } = await subscriptionsQuery;
+    if (error) throw error;
 
-    const recentChanges = this.db.prepare(`
-      SELECT
-        new_tier,
-        COUNT(*) as changes,
-        DATE(created_at) as change_date
-      FROM subscription_history
-      ${userId ? 'WHERE user_id = ?' : ''}
-      AND created_at >= date('now', '-30 days')
-      GROUP BY new_tier, DATE(created_at)
-      ORDER BY change_date DESC
-    `).all(userId ? [userId] : []);
+    const grouped: Record<string, any> = {};
+    (subscriptions || []).forEach((row: any) => {
+      const key = `${row.subscription_tier}-${row.subscription_status}`;
+      if (!grouped[key]) {
+        grouped[key] = {
+          subscription_tier: row.subscription_tier,
+          subscription_status: row.subscription_status,
+          count: 0,
+          avg_usage: 0,
+          avg_limit: 0
+        };
+      }
+      grouped[key].count += 1;
+      grouped[key].avg_usage += Number(row.api_requests_used || 0);
+      grouped[key].avg_limit += Number(row.api_requests_limit || 0);
+    });
+
+    const subs = Object.values(grouped).map((g: any) => ({
+      ...g,
+      avg_usage: g.count > 0 ? g.avg_usage / g.count : 0,
+      avg_limit: g.count > 0 ? g.avg_limit / g.count : 0
+    }));
+
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    let historyQuery = this.supabase
+      .from('subscription_history')
+      .select('*')
+      .gte('created_at', thirtyDaysAgo.toISOString());
+
+    if (userId) {
+      historyQuery = historyQuery.eq('user_id', userId);
+    }
+
+    const { data: recentChanges, error: rcErr } = await historyQuery;
+    if (rcErr) throw rcErr;
 
     return {
-      subscriptions,
-      recentChanges,
+      subscriptions: subs,
+      recentChanges: recentChanges || [],
       summary: {
-        totalSubscriptions: subscriptions.reduce((sum, s) => sum + s.count, 0),
-        activeSubscriptions: subscriptions
-          .filter(s => s.subscription_status === 'active')
-          .reduce((sum, s) => sum + s.count, 0)
+        totalSubscriptions: subs.reduce((sum: number, s: any) => sum + s.count, 0),
+        activeSubscriptions: subs
+          .filter((s: any) => s.subscription_status === 'active')
+          .reduce((sum: number, s: any) => sum + s.count, 0)
       }
     };
   }
 
-  /**
-   * Check and update subscription statuses
-   */
   async updateSubscriptionStatuses(): Promise<void> {
-    const now = new Date();
+    const now = new Date().toISOString();
 
-    // Find subscriptions that should be canceled
-    const toCancel = this.db.prepare(`
-      SELECT user_id FROM sdk_profiles
-      WHERE cancel_at_period_end = 1
-      AND current_period_end <= ?
-    `).all(now.toISOString());
+    const { data: toCancel } = await this.supabase
+      .from('sdk_profiles')
+      .select('user_id')
+      .eq('cancel_at_period_end', true)
+      .lte('current_period_end', now);
 
-    for (const sub of toCancel) {
-      this.db.prepare(`
-        UPDATE sdk_profiles
-        SET subscription_status = 'canceled',
-            cancel_at_period_end = 0,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = ?
-      `).run(sub.user_id);
+    for (const sub of (toCancel || [])) {
+      await this.supabase
+        .from('sdk_profiles')
+        .update({
+          subscription_status: 'canceled',
+          cancel_at_period_end: false,
+          updated_at: new Date().toISOString()
+        })
+        .eq('user_id', sub.user_id);
 
-      this.createNotification(
+      await this.createNotification(
         sub.user_id,
         'subscription_canceled',
         'Subscription Canceled',
@@ -440,20 +438,22 @@ export class SubscriptionService {
       );
     }
 
-    // Find trial subscriptions ending soon
-    const trialsEnding = this.db.prepare(`
-      SELECT user_id FROM sdk_profiles
-      WHERE subscription_status = 'trialing'
-      AND trial_ends_at <= date('now', '+3 days')
-      AND trial_ends_at > date('now')
-    `).all();
+    const threeDaysLater = new Date();
+    threeDaysLater.setDate(threeDaysLater.getDate() + 3);
 
-    for (const trial of trialsEnding) {
+    const { data: trialsEnding } = await this.supabase
+      .from('sdk_profiles')
+      .select('user_id, trial_ends_at')
+      .eq('subscription_status', 'trialing')
+      .lte('trial_ends_at', threeDaysLater.toISOString())
+      .gt('trial_ends_at', now);
+
+    for (const trial of (trialsEnding || [])) {
       const daysLeft = Math.ceil(
-        (new Date(trial.trial_ends_at).getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
+        (new Date(trial.trial_ends_at).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24)
       );
 
-      this.createNotification(
+      await this.createNotification(
         trial.user_id,
         'trial_ending',
         'Trial Ending Soon',
@@ -464,6 +464,6 @@ export class SubscriptionService {
   }
 }
 
-export const createSubscriptionService = (db: Database.Database): SubscriptionService => {
-  return new SubscriptionService(db);
+export const createSubscriptionService = (supabase: SupabaseClient): SubscriptionService => {
+  return new SubscriptionService(supabase);
 };

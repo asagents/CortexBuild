@@ -33,88 +33,50 @@ export function createProjectsRouter(supabase: SupabaseClient): Router {
       limit = 20
     } = req.query as any;
 
-    const pageNum = page;
-    const limitNum = limit;
-
+    const pageNum = Number(page) || 1;
+    const limitNum = Number(limit) || 20;
     const offset = (pageNum - 1) * limitNum;
 
-    // Build query
-    let query = `
-      SELECT p.*,
-             c.name as client_name,
-             u.name as manager_name
-      FROM projects p
-      LEFT JOIN clients c ON p.client_id = c.id
-      LEFT JOIN users u ON p.project_manager_id = u.id
-      WHERE 1=1
-    `;
-    const params: any[] = [];
+    // Use a custom rpc if available, otherwise emulate with query builder
+    // Fallback: fetch projects and count in two calls
+    let query = supabase.from('projects').select('*', { count: 'exact' });
 
-    if (status) {
-      query += ' AND p.status = ?';
-      params.push(status);
+    if (status) query = query.eq('status', status);
+    if (priority) query = query.eq('priority', priority);
+    if (client_id) query = query.eq('client_id', Number(client_id));
+    if (project_manager_id) query = query.eq('project_manager_id', Number(project_manager_id));
+    if (company_id) query = query.eq('company_id', Number(company_id));
+    if (search && typeof search === 'string' && search.length >= 2) {
+      query = query.or(`name.ilike.%${search}%,description.ilike.%${search}%,project_number.ilike.%${search}%`);
     }
 
-    if (priority) {
-      query += ' AND p.priority = ?';
-      params.push(priority);
-    }
+    const { data: projects, error, count } = await query
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limitNum - 1);
 
-    if (client_id) {
-      const clientIdNum = parseInt(client_id);
-      if (isNaN(clientIdNum)) {
-        throw new ValidationError('Invalid client ID');
-      }
-      query += ' AND p.client_id = ?';
-      params.push(clientIdNum);
-    }
+    if (error) throw new DatabaseError('Failed to fetch projects: ' + error.message);
 
-    if (project_manager_id) {
-      const managerIdNum = parseInt(project_manager_id);
-      if (isNaN(managerIdNum)) {
-        throw new ValidationError('Invalid project manager ID');
-      }
-      query += ' AND p.project_manager_id = ?';
-      params.push(managerIdNum);
-    }
+    const total = count || 0;
 
-    if (company_id) {
-      const companyIdNum = parseInt(company_id, 10);
-      if (isNaN(companyIdNum)) {
-        throw new ValidationError('Invalid company ID');
-      }
-      query += ' AND p.company_id = ?';
-      params.push(companyIdNum);
-    }
+    // Enrich with client and manager names
+    const clientIds = [...new Set((projects || []).map((p: any) => p.client_id).filter(Boolean))];
+    const managerIds = [...new Set((projects || []).map((p: any) => p.project_manager_id).filter(Boolean))];
 
-    if (search) {
-      if (typeof search !== 'string' || search.length < 2) {
-        throw new ValidationError('Search term must be at least 2 characters');
-      }
-      query += ' AND (p.name LIKE ? OR p.description LIKE ? OR p.project_number LIKE ?)';
-      const searchTerm = `%${search}%`;
-      params.push(searchTerm, searchTerm, searchTerm);
-    }
+    const { data: clients } = clientIds.length ? await supabase.from('clients').select('id,name').in('id', clientIds) : { data: [] };
+    const { data: managers } = managerIds.length ? await supabase.from('users').select('id,name').in('id', managerIds) : { data: [] };
 
-    // Get total count
-    const countQuery = query.replace(/SELECT[\s\S]*?FROM/, 'SELECT COUNT(*) as total FROM');
-    const countResult = db.prepare(countQuery).get(...params) as { total: number };
+    const clientMap = new Map((clients || []).map((c: any) => [c.id, c.name]));
+    const managerMap = new Map((managers || []).map((m: any) => [m.id, m.name]));
 
-    if (!countResult) {
-      throw new DatabaseError('Failed to get project count');
-    }
-
-    const { total } = countResult;
-
-    // Add pagination
-    query += ' ORDER BY p.created_at DESC LIMIT ? OFFSET ?';
-    params.push(limitNum, offset);
-
-    const projects = db.prepare(query).all(...params);
+    const enriched = (projects || []).map((p: any) => ({
+      ...p,
+      client_name: clientMap.get(p.client_id) || null,
+      manager_name: managerMap.get(p.project_manager_id) || null
+    }));
 
     const response: PaginatedResponse<Project> = {
       success: true,
-      data: projects as Project[],
+      data: enriched as Project[],
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -129,67 +91,52 @@ export function createProjectsRouter(supabase: SupabaseClient): Router {
   // GET /api/projects/:id - Get single project
   router.get('/:id', validateParams(idParamSchema), asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
-    const projectId = parseInt(id);
+    const projectId = Number(id);
 
-    const project = db.prepare(`
-      SELECT p.*,
-             c.name as client_name,
-             c.email as client_email,
-             c.phone as client_phone,
-             u.name as manager_name,
-             u.email as manager_email
-      FROM projects p
-      LEFT JOIN clients c ON p.client_id = c.id
-      LEFT JOIN users u ON p.project_manager_id = u.id
-      WHERE p.id = ?
-    `).get(projectId);
+    const { data: project, error } = await supabase
+      .from('projects')
+      .select('*, clients(name), users!projects_project_manager_id_fkey(name)')
+      .eq('id', projectId)
+      .single();
 
-    if (!project) {
+    if (error || !project) {
       throw new NotFoundError('Project');
     }
 
-    // Get project tasks
-    const tasks = db.prepare(`
-      SELECT t.*, u.name as assigned_to_name
-      FROM tasks t
-      LEFT JOIN users u ON t.assigned_to = u.id
-      WHERE t.project_id = ?
-      ORDER BY t.order_index, t.created_at
-    `).all(projectId);
+    const { data: tasks } = await supabase
+      .from('tasks')
+      .select('*, users!tasks_assigned_to_fkey(name)')
+      .eq('project_id', projectId)
+      .order('order_index', { ascending: true })
+      .order('created_at', { ascending: true });
 
-    // Get project milestones
-    const milestones = db.prepare(`
-      SELECT * FROM milestones
-      WHERE project_id = ?
-      ORDER BY due_date
-    `).all(projectId);
+    const { data: milestones } = await supabase
+      .from('milestones')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('due_date', { ascending: true });
 
-    // Get project team
-    const team = db.prepare(`
-      SELECT pt.*, u.name as full_name, u.email, u.avatar as avatar_url
-      FROM project_team pt
-      JOIN users u ON pt.user_id = u.id
-      WHERE pt.project_id = ? AND pt.left_at IS NULL
-    `).all(projectId);
+    const { data: team } = await supabase
+      .from('project_team')
+      .select('*, users!project_team_user_id_fkey(name, email, avatar)')
+      .eq('project_id', projectId)
+      .is('left_at', null);
 
-    // Get recent activities
-    const activities = db.prepare(`
-      SELECT a.*, u.name as user_name
-      FROM activities a
-      JOIN users u ON a.user_id = u.id
-      WHERE a.project_id = ?
-      ORDER BY a.created_at DESC
-      LIMIT 20
-    `).all(projectId);
+    const { data: activities } = await supabase
+      .from('activities')
+      .select('*, users!activities_user_id_fkey(name)')
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: false })
+      .limit(20);
 
     const response: ApiResponse = {
       success: true,
       data: {
         ...project,
-        tasks,
-        milestones,
-        team,
-        activities
+        tasks: tasks || [],
+        milestones: milestones || [],
+        team: team || [],
+        activities: activities || []
       }
     };
 
@@ -216,137 +163,132 @@ export function createProjectsRouter(supabase: SupabaseClient): Router {
       project_manager_id
     } = req.body;
 
-    try {
-      const result = db.prepare(`
-        INSERT INTO projects (
-          company_id, name, description, project_number, status, priority,
-          start_date, end_date, budget, address, city, state, zip_code,
-          client_id, project_manager_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        company_id, name.trim(), description?.trim() || null, project_number?.trim() || null, status, priority,
-        start_date || null, end_date || null, budget || null, address?.trim() || null,
-        city?.trim() || null, state?.trim() || null, zip_code?.trim() || null,
-        client_id || null, project_manager_id || null
-      );
+    const { data: project, error } = await supabase
+      .from('projects')
+      .insert({
+        company_id,
+        name: name?.trim(),
+        description: description?.trim() || null,
+        project_number: project_number?.trim() || null,
+        status,
+        priority,
+        start_date: start_date || null,
+        end_date: end_date || null,
+        budget: budget || null,
+        address: address?.trim() || null,
+        city: city?.trim() || null,
+        state: state?.trim() || null,
+        zip_code: zip_code?.trim() || null,
+        client_id: client_id || null,
+        project_manager_id: project_manager_id || null
+      })
+      .select()
+      .single();
 
-      if (error) throw error;
-
-      if (!project) {
-        throw new DatabaseError('Failed to retrieve created project');
-      }
-
-      // Log activity
-      logProjectActivity(
-        db,
-        req.user?.id || 'user-1',
-        result.lastInsertRowid,
-        'created',
-        `Created project: ${name}`
-      );
-
-      res.status(201).json({
-        success: true,
-        data: project,
-        message: 'Project created successfully'
-      });
-    } catch (error: any) {
-      // Handle database constraint violations
-      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+    if (error) {
+      if (error.code === '23505') { // unique_violation
         throw new ValidationError('A project with this number already exists');
       }
-      if (error.code === 'SQLITE_CONSTRAINT_FOREIGN') {
+      if (error.code === '23503') { // foreign_key_violation
         throw new ValidationError('Invalid reference to company, client, or project manager');
       }
       throw new DatabaseError('Failed to create project');
     }
+
+    res.status(201).json({
+      success: true,
+      data: project,
+      message: 'Project created successfully'
+    });
   }));
 
   // PUT /api/projects/:id - Update project
   router.put('/:id', validateParams(idParamSchema), validateBody(updateProjectSchema), asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
     const updates = req.body;
-    const projectId = parseInt(id);
+    const projectId = Number(id);
 
-    // Check if project exists
-    const existing = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
-    if (!existing) {
+    const { data: existing, error: findErr } = await supabase
+      .from('projects')
+      .select('id, name')
+      .eq('id', projectId)
+      .single();
+
+    if (findErr || !existing) {
       throw new NotFoundError('Project');
     }
 
-    const setClause = fields.map(field => `${field} = ?`).join(', ');
-    const values = fields.map(field => {
-      const value = updates[field];
-      return typeof value === 'string' ? value.trim() : value;
-    });
+    const patch: any = {};
+    if (updates.name !== undefined) patch.name = updates.name?.trim();
+    if (updates.description !== undefined) patch.description = updates.description?.trim() || null;
+    if (updates.project_number !== undefined) patch.project_number = updates.project_number?.trim() || null;
+    if (updates.status !== undefined) patch.status = updates.status;
+    if (updates.priority !== undefined) patch.priority = updates.priority;
+    if (updates.start_date !== undefined) patch.start_date = updates.start_date || null;
+    if (updates.end_date !== undefined) patch.end_date = updates.end_date || null;
+    if (updates.budget !== undefined) patch.budget = updates.budget || null;
+    if (updates.address !== undefined) patch.address = updates.address?.trim() || null;
+    if (updates.city !== undefined) patch.city = updates.city?.trim() || null;
+    if (updates.state !== undefined) patch.state = updates.state?.trim() || null;
+    if (updates.zip_code !== undefined) patch.zip_code = updates.zip_code?.trim() || null;
+    if (updates.client_id !== undefined) patch.client_id = updates.client_id || null;
+    if (updates.project_manager_id !== undefined) patch.project_manager_id = updates.project_manager_id || null;
 
-    try {
-      db.prepare(`
-        UPDATE projects
-        SET ${setClause}, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(...values, projectId);
+    const { data: project, error } = await supabase
+      .from('projects')
+      .update(patch)
+      .eq('id', projectId)
+      .select()
+      .single();
 
-      const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
-
-      if (!project) {
-        throw new DatabaseError('Failed to retrieve updated project');
-      }
-
-      // Log activity
-      db.prepare(`
-        INSERT INTO activities (user_id, project_id, entity_type, entity_id, action, description)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(
-        req.user?.id || 1,
-        projectId,
-        'project',
-        projectId,
-        'updated',
-        `Updated project: ${(existing as any).name}`
-      );
-
-      res.json({
-        success: true,
-        data: project,
-        message: 'Project updated successfully'
-      });
-    } catch (error: any) {
-      // Handle database constraint violations
-      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+    if (error) {
+      if (error.code === '23505') {
         throw new ValidationError('A project with this number already exists');
       }
-      if (error.code === 'SQLITE_CONSTRAINT_FOREIGN') {
+      if (error.code === '23503') {
         throw new ValidationError('Invalid reference to client or project manager');
       }
       throw new DatabaseError('Failed to update project');
     }
+
+    res.json({
+      success: true,
+      data: project,
+      message: 'Project updated successfully'
+    });
   }));
 
   // DELETE /api/projects/:id - Delete project
   router.delete('/:id', validateParams(idParamSchema), asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
-    const projectId = parseInt(id);
+    const projectId = Number(id);
 
-    const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
-    if (!project) {
+    const { data: existing, error: findErr } = await supabase
+      .from('projects')
+      .select('id')
+      .eq('id', projectId)
+      .single();
+
+    if (findErr || !existing) {
       throw new NotFoundError('Project');
     }
 
-    try {
-      db.prepare('DELETE FROM projects WHERE id = ?').run(projectId);
+    const { error } = await supabase
+      .from('projects')
+      .delete()
+      .eq('id', projectId);
 
-      res.json({
-        success: true,
-        message: 'Project deleted successfully'
-      });
-    } catch (error: any) {
-      // Handle foreign key constraint violations
-      if (error.code === 'SQLITE_CONSTRAINT_FOREIGN') {
+    if (error) {
+      if (error.code === '23503') {
         throw new ValidationError('Cannot delete project with existing dependencies (tasks, activities, etc.)');
       }
       throw new DatabaseError('Failed to delete project');
     }
+
+    res.json({
+      success: true,
+      message: 'Project deleted successfully'
+    });
   }));
 
   return router;

@@ -3,7 +3,7 @@
  * Handles real-time collaboration features for developers
  */
 
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface CollaborationSession {
@@ -55,173 +55,146 @@ export interface LiveCursor {
 }
 
 export class CollaborationService {
-  constructor(private db: Database.Database) {}
+  constructor(private supabase: SupabaseClient) {}
 
-  /**
-   * Create a new collaboration session
-   */
-  createSession(
+  async createSession(
     workspaceId: string,
     name: string,
     description: string,
     createdBy: string,
     settings: any = {}
-  ): CollaborationSession {
+  ): Promise<CollaborationSession> {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    const stmt = this.db.prepare(`
-      INSERT INTO collaboration_sessions (id, workspace_id, name, description, created_by, participants, settings, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    const { data, error } = await this.supabase
+      .from('collaboration_sessions')
+      .insert({
+        id,
+        workspace_id: workspaceId,
+        name,
+        description,
+        created_by: createdBy,
+        participants: JSON.stringify([createdBy]),
+        settings: JSON.stringify(settings),
+        is_active: true,
+        created_at: now,
+        updated_at: now
+      })
+      .select()
+      .single();
 
-    stmt.run(
-      id,
-      workspaceId,
-      name,
-      description,
-      createdBy,
-      JSON.stringify([createdBy]),
-      JSON.stringify(settings),
-      1,
-      now,
-      now
-    );
-
-    return this.getSession(id)!;
+    if (error) throw error;
+    return this.mapSession(data);
   }
 
-  /**
-   * Get collaboration session
-   */
-  getSession(id: string): CollaborationSession | null {
-    const stmt = this.db.prepare(`
-      SELECT * FROM collaboration_sessions WHERE id = ?
-    `);
+  async getSession(id: string): Promise<CollaborationSession | null> {
+    const { data, error } = await this.supabase
+      .from('collaboration_sessions')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-    const session = stmt.get(id) as any;
-
-    if (!session) return null;
-
-    return {
-      ...session,
-      is_active: Boolean(session.is_active),
-      participants: JSON.parse(session.participants || '[]'),
-      settings: JSON.parse(session.settings || '{}')
-    };
+    if (error && error.code !== 'PGRST116') throw error;
+    if (!data) return null;
+    return this.mapSession(data);
   }
 
-  /**
-   * Join collaboration session
-   */
-  joinSession(sessionId: string, userId: string): CollaborationSession | null {
-    const session = this.getSession(sessionId);
+  async joinSession(sessionId: string, userId: string): Promise<CollaborationSession | null> {
+    const session = await this.getSession(sessionId);
     if (!session || !session.is_active) return null;
 
     const participants = new Set(session.participants);
     participants.add(userId);
 
-    const stmt = this.db.prepare(`
-      UPDATE collaboration_sessions
-      SET participants = ?, updated_at = ?
-      WHERE id = ?
-    `);
+    const { data, error } = await this.supabase
+      .from('collaboration_sessions')
+      .update({
+        participants: JSON.stringify([...participants]),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', sessionId)
+      .select()
+      .single();
 
-    stmt.run(JSON.stringify([...participants]), new Date().toISOString(), sessionId);
+    if (error) throw error;
 
-    // Log join event
-    this.logEvent(sessionId, userId, 'join', { message: 'User joined session' });
-
-    return this.getSession(sessionId);
+    await this.logEvent(sessionId, userId, 'join', { message: 'User joined session' });
+    return data ? this.mapSession(data) : null;
   }
 
-  /**
-   * Leave collaboration session
-   */
-  leaveSession(sessionId: string, userId: string): boolean {
-    const session = this.getSession(sessionId);
+  async leaveSession(sessionId: string, userId: string): Promise<boolean> {
+    const session = await this.getSession(sessionId);
     if (!session) return false;
 
     const participants = new Set(session.participants);
     participants.delete(userId);
 
-    const stmt = this.db.prepare(`
-      UPDATE collaboration_sessions
-      SET participants = ?, updated_at = ?
-      WHERE id = ?
-    `);
+    const { error } = await this.supabase
+      .from('collaboration_sessions')
+      .update({
+        participants: JSON.stringify([...participants]),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', sessionId);
 
-    const result = stmt.run(JSON.stringify([...participants]), new Date().toISOString(), sessionId);
+    if (error) throw error;
 
-    // Log leave event
-    this.logEvent(sessionId, userId, 'leave', { message: 'User left session' });
-
-    return result.changes > 0;
+    await this.logEvent(sessionId, userId, 'leave', { message: 'User left session' });
+    return true;
   }
 
-  /**
-   * Log collaboration event
-   */
-  logEvent(
+  async logEvent(
     sessionId: string,
     userId: string,
     eventType: CollaborationEvent['event_type'],
     eventData: any
-  ): CollaborationEvent {
+  ): Promise<CollaborationEvent> {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    const stmt = this.db.prepare(`
-      INSERT INTO collaboration_events (id, session_id, user_id, event_type, event_data, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
+    const { data, error } = await this.supabase
+      .from('collaboration_events')
+      .insert({
+        id,
+        session_id: sessionId,
+        user_id: userId,
+        event_type: eventType,
+        event_data: JSON.stringify(eventData),
+        created_at: now
+      })
+      .select()
+      .single();
 
-    stmt.run(id, sessionId, userId, eventType, JSON.stringify(eventData), now);
-
-    return this.getEvent(id)!;
+    if (error) throw error;
+    return this.mapEvent(data);
   }
 
-  /**
-   * Get collaboration event
-   */
-  getEvent(id: string): CollaborationEvent | null {
-    const stmt = this.db.prepare(`
-      SELECT * FROM collaboration_events WHERE id = ?
-    `);
+  async getEvent(id: string): Promise<CollaborationEvent | null> {
+    const { data, error } = await this.supabase
+      .from('collaboration_events')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-    const event = stmt.get(id) as any;
-
-    if (!event) return null;
-
-    return {
-      ...event,
-      event_data: JSON.parse(event.event_data || '{}')
-    };
+    if (error && error.code !== 'PGRST116') throw error;
+    if (!data) return null;
+    return this.mapEvent(data);
   }
 
-  /**
-   * Get session events
-   */
-  getSessionEvents(sessionId: string, limit: number = 50): CollaborationEvent[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM collaboration_events
-      WHERE session_id = ?
-      ORDER BY created_at DESC
-      LIMIT ?
-    `);
+  async getSessionEvents(sessionId: string, limit: number = 50): Promise<CollaborationEvent[]> {
+    const { data, error } = await this.supabase
+      .from('collaboration_events')
+      .select('*')
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: true })
+      .limit(limit);
 
-    const events = stmt.all(sessionId, limit) as any[];
-
-    return events.map(event => ({
-      ...event,
-      event_data: JSON.parse(event.event_data || '{}')
-    })).reverse(); // Return in chronological order
+    if (error) throw error;
+    return (data || []).map((e: any) => this.mapEvent(e));
   }
 
-  /**
-   * Add code comment
-   */
-  addCodeComment(
+  async addCodeComment(
     sessionId: string,
     filePath: string,
     lineNumber: number,
@@ -229,60 +202,58 @@ export class CollaborationService {
     columnEnd: number,
     content: string,
     authorId: string
-  ): CodeComment {
+  ): Promise<CodeComment> {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    const stmt = this.db.prepare(`
-      INSERT INTO code_comments (id, session_id, file_path, line_number, column_start, column_end, content, author_id, is_resolved, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    const { data, error } = await this.supabase
+      .from('code_comments')
+      .insert({
+        id,
+        session_id: sessionId,
+        file_path: filePath,
+        line_number: lineNumber,
+        column_start: columnStart,
+        column_end: columnEnd,
+        content,
+        author_id: authorId,
+        is_resolved: false,
+        created_at: now,
+        updated_at: now
+      })
+      .select()
+      .single();
 
-    stmt.run(id, sessionId, filePath, lineNumber, columnStart, columnEnd, content, authorId, 0, now, now);
-
-    return this.getCodeComment(id)!;
+    if (error) throw error;
+    return this.mapComment(data);
   }
 
-  /**
-   * Get code comment
-   */
-  getCodeComment(id: string): CodeComment | null {
-    const stmt = this.db.prepare(`
-      SELECT * FROM code_comments WHERE id = ?
-    `);
+  async getCodeComment(id: string): Promise<CodeComment | null> {
+    const { data, error } = await this.supabase
+      .from('code_comments')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-    const comment = stmt.get(id) as any;
-
-    if (!comment) return null;
-
-    return {
-      ...comment,
-      is_resolved: Boolean(comment.is_resolved)
-    };
+    if (error && error.code !== 'PGRST116') throw error;
+    if (!data) return null;
+    return this.mapComment(data);
   }
 
-  /**
-   * Get file comments
-   */
-  getFileComments(sessionId: string, filePath: string): CodeComment[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM code_comments
-      WHERE session_id = ? AND file_path = ?
-      ORDER BY line_number, column_start
-    `);
+  async getFileComments(sessionId: string, filePath: string): Promise<CodeComment[]> {
+    const { data, error } = await this.supabase
+      .from('code_comments')
+      .select('*')
+      .eq('session_id', sessionId)
+      .eq('file_path', filePath)
+      .order('line_number', { ascending: true })
+      .order('column_start', { ascending: true });
 
-    const comments = stmt.all(sessionId, filePath) as any[];
-
-    return comments.map(comment => ({
-      ...comment,
-      is_resolved: Boolean(comment.is_resolved)
-    }));
+    if (error) throw error;
+    return (data || []).map((c: any) => this.mapComment(c));
   }
 
-  /**
-   * Update live cursor position
-   */
-  updateLiveCursor(
+  async updateLiveCursor(
     sessionId: string,
     userId: string,
     filePath: string,
@@ -290,139 +261,98 @@ export class CollaborationService {
     column: number,
     color: string,
     userName: string
-  ): LiveCursor {
+  ): Promise<LiveCursor> {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    // First, remove old cursor position for this user
-    this.db.prepare(`
-      DELETE FROM live_cursors
-      WHERE session_id = ? AND user_id = ?
-    `).run(sessionId, userId);
+    await this.supabase
+      .from('live_cursors')
+      .delete()
+      .eq('session_id', sessionId)
+      .eq('user_id', userId);
 
-    // Insert new cursor position
-    const stmt = this.db.prepare(`
-      INSERT INTO live_cursors (id, session_id, user_id, file_path, line_number, column, color, user_name, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    const { data, error } = await this.supabase
+      .from('live_cursors')
+      .insert({
+        id,
+        session_id: sessionId,
+        user_id: userId,
+        file_path: filePath,
+        line_number: lineNumber,
+        column,
+        color,
+        user_name: userName,
+        updated_at: now
+      })
+      .select()
+      .single();
 
-    stmt.run(id, sessionId, userId, filePath, lineNumber, column, color, userName, now);
-
-    return this.getLiveCursor(id)!;
+    if (error) throw error;
+    return data as LiveCursor;
   }
 
-  /**
-   * Get live cursor
-   */
-  getLiveCursor(id: string): LiveCursor | null {
-    const stmt = this.db.prepare(`
-      SELECT * FROM live_cursors WHERE id = ?
-    `);
+  async getLiveCursor(id: string): Promise<LiveCursor | null> {
+    const { data, error } = await this.supabase
+      .from('live_cursors')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-    return stmt.get(id) as LiveCursor;
+    if (error && error.code !== 'PGRST116') throw error;
+    return data as LiveCursor | null;
   }
 
-  /**
-   * Get all live cursors for a session
-   */
-  getLiveCursors(sessionId: string): LiveCursor[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM live_cursors
-      WHERE session_id = ? AND updated_at > datetime('now', '-5 seconds')
-    `);
+  async getLiveCursors(sessionId: string): Promise<LiveCursor[]> {
+    const fiveSecondsAgo = new Date(Date.now() - 5000).toISOString();
+    const { data, error } = await this.supabase
+      .from('live_cursors')
+      .select('*')
+      .eq('session_id', sessionId)
+      .gte('updated_at', fiveSecondsAgo);
 
-    return stmt.all(sessionId) as LiveCursor[];
+    if (error) throw error;
+    return (data || []) as LiveCursor[];
   }
 
-  /**
-   * Clean up old cursors (older than 5 seconds)
-   */
-  cleanupOldCursors(): number {
-    const stmt = this.db.prepare(`
-      DELETE FROM live_cursors
-      WHERE updated_at < datetime('now', '-5 seconds')
-    `);
+  async cleanupOldCursors(): Promise<number> {
+    const fiveSecondsAgo = new Date(Date.now() - 5000).toISOString();
+    const { error } = await this.supabase
+      .from('live_cursors')
+      .delete()
+      .lt('updated_at', fiveSecondsAgo);
 
-    const result = stmt.run();
-    return result.changes;
+    if (error) throw error;
+    return 0; // Supabase delete does not return row count easily without count option
   }
 
-  /**
-   * Initialize collaboration tables
-   */
-  static initTables(db: Database.Database): void {
-    // Collaboration sessions table
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS collaboration_sessions (
-        id TEXT PRIMARY KEY,
-        workspace_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        description TEXT,
-        created_by TEXT NOT NULL,
-        participants TEXT NOT NULL,
-        settings TEXT,
-        is_active INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-        FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
-      )
-    `);
+  private mapSession(row: any): CollaborationSession {
+    return {
+      ...row,
+      is_active: Boolean(row.is_active),
+      participants: typeof row.participants === 'string' ? JSON.parse(row.participants || '[]') : (row.participants || []),
+      settings: typeof row.settings === 'string' ? JSON.parse(row.settings || '{}') : (row.settings || {})
+    };
+  }
 
-    // Collaboration events table
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS collaboration_events (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        event_type TEXT NOT NULL,
-        event_data TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (session_id) REFERENCES collaboration_sessions(id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-      )
-    `);
+  private mapEvent(row: any): CollaborationEvent {
+    return {
+      ...row,
+      event_data: typeof row.event_data === 'string' ? JSON.parse(row.event_data || '{}') : (row.event_data || {})
+    };
+  }
 
-    // Code comments table
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS code_comments (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        file_path TEXT NOT NULL,
-        line_number INTEGER NOT NULL,
-        column_start INTEGER NOT NULL,
-        column_end INTEGER NOT NULL,
-        content TEXT NOT NULL,
-        author_id TEXT NOT NULL,
-        is_resolved INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (session_id) REFERENCES collaboration_sessions(id) ON DELETE CASCADE,
-        FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
-      )
-    `);
+  private mapComment(row: any): CodeComment {
+    return {
+      ...row,
+      is_resolved: Boolean(row.is_resolved)
+    };
+  }
 
-    // Live cursors table
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS live_cursors (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        file_path TEXT NOT NULL,
-        line_number INTEGER NOT NULL,
-        column INTEGER NOT NULL,
-        color TEXT NOT NULL,
-        user_name TEXT NOT NULL,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (session_id) REFERENCES collaboration_sessions(id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-      )
-    `);
-
-    console.log('✅ Collaboration tables initialized');
+  static initTables(supabase: SupabaseClient): void {
+    console.log('✅ Collaboration tables managed via Supabase (initTables is a no-op at runtime)');
   }
 }
 
-export const createCollaborationService = (db: Database.Database): CollaborationService => {
-  return new CollaborationService(db);
+export const createCollaborationService = (supabase: SupabaseClient): CollaborationService => {
+  return new CollaborationService(supabase);
 };
