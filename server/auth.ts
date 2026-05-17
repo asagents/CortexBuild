@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'cortexbuild-secret-2025';
 const TOKEN_EXPIRY = '24h';
@@ -11,63 +11,38 @@ interface JWTPayload {
   email: string;
 }
 
-interface DbUserRow {
-  id: number | string;
+interface UserProfile {
+  id: string;
   email: string;
-  password?: string;
+  name: string;
+  role: string;
+  avatar: string;
+  company_id?: string;
   password_hash?: string;
+  password?: string;
   first_name?: string;
   last_name?: string;
-  name?: string;
-  role: string;
-  avatar?: string;
-  avatar_url?: string;
-  company_id?: number | string;
 }
 
-let globalDb: Database.Database | null = null;
-let userTableInfoCache: { hasPasswordHash: boolean } | null = null;
+let supabaseInstance: SupabaseClient | null = null;
 
-export const setDatabase = (dbInstance: Database.Database) => {
-  globalDb = dbInstance;
-  userTableInfoCache = null;
+export const setDatabase = (supa: SupabaseClient) => {
+  supabaseInstance = supa;
 };
 
-const requireDb = (): Database.Database => {
-  if (!globalDb) {
-    throw new Error('Database not initialized');
+const requireSupa = (): SupabaseClient => {
+  if (!supabaseInstance) {
+    throw new Error('Supabase client not initialized');
   }
-  return globalDb;
+  return supabaseInstance;
 };
 
-const getUserTableInfo = (db: Database.Database) => {
-  if (!userTableInfoCache) {
-    const columns = db
-      .prepare("PRAGMA table_info('users')")
-      .all() as { name: string }[];
-
-    userTableInfoCache = {
-      hasPasswordHash: columns.some((column) => column.name === 'password_hash'),
-    };
-  }
-
-  return userTableInfoCache;
-};
-
-const mapUserRow = (row: DbUserRow | undefined | null) => {
-  if (!row) {
-    return null;
-  }
-
+const mapUserRow = (row: Record<string, any> | null): UserProfile | null => {
+  if (!row) return null;
   const firstName = row.first_name ?? '';
   const lastName = row.last_name ?? '';
   const legacyName = row.name ?? '';
-  const displayName =
-    `${firstName} ${lastName}`.trim() ||
-    legacyName.trim() ||
-    row.email ||
-    'User';
-
+  const displayName = `${firstName} ${lastName}`.trim() || legacyName.trim() || row.email || 'User';
   return {
     id: String(row.id),
     email: row.email,
@@ -78,56 +53,79 @@ const mapUserRow = (row: DbUserRow | undefined | null) => {
       row.company_id !== undefined && row.company_id !== null
         ? String(row.company_id)
         : undefined,
+    password_hash: row.password_hash,
+    password: row.password,
+    first_name: row.first_name,
+    last_name: row.last_name,
   };
 };
 
-const ensureSessionsTable = (db: Database.Database) => {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY,
-      user_id INTEGER NOT NULL,
-      token TEXT UNIQUE NOT NULL,
-      expires_at DATETIME NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
+const createDevelopmentUser = async (supa: SupabaseClient, email: string, password: string): Promise<UserProfile | null> => {
+  console.log('👤 [Auth] Creating development user:', email);
+  const passwordHash = bcrypt.hashSync(password, 10);
+  const companyName = email === 'admin@cortexbuild.com' ? 'CortexBuild' : 'ConstructCo';
 
-  db.exec(
-    'CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);',
-  );
-  db.exec(
-    'CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);',
-  );
+  let { data: company } = await supa.from('companies').select('id').ilike('name', companyName).single();
+  let companyId: string;
+  if (!company) {
+    const { data: inserted, error } = await supa.from('companies').insert({ name: companyName }).select('id').single();
+    if (error) throw error;
+    companyId = inserted.id;
+  } else {
+    companyId = company.id;
+  }
+
+  const role = email === 'admin@cortexbuild.com' ? 'super_admin' : 'company_admin';
+  const name = email === 'admin@cortexbuild.com' ? 'System Administrator' : 'Project Manager';
+  const [firstName, ...rest] = name.split(' ');
+  const lastName = rest.join(' ') || firstName;
+
+  const { data: user, error: userError } = await supa
+    .from('users')
+    .insert({
+      email,
+      password_hash: passwordHash,
+      first_name: firstName,
+      last_name: lastName,
+      role,
+      company_id: companyId,
+      is_active: true,
+      email_verified: true,
+    })
+    .select()
+    .single();
+
+  if (userError) throw userError;
+  return mapUserRow(user);
 };
 
-const getUserByEmail = (db: Database.Database, email: string) => {
-  return db
-    .prepare('SELECT * FROM users WHERE LOWER(email) = LOWER(?)')
-    .get(email) as DbUserRow | undefined;
+const getUserByEmail = async (supa: SupabaseClient, email: string): Promise<UserProfile | null> => {
+  const { data, error } = await supa.from('users').select('*').ilike('email', email).single();
+  if (error) return null;
+  return mapUserRow(data);
 };
 
-const getUserById = (db: Database.Database, id: string | number) => {
-  return db
-    .prepare('SELECT * FROM users WHERE id = ?')
-    .get(id) as DbUserRow | undefined;
+const getUserById = async (supa: SupabaseClient, id: string | number): Promise<UserProfile | null> => {
+  const { data, error } = await supa.from('users').select('*').eq('id', id).single();
+  if (error) return null;
+  return mapUserRow(data);
 };
 
-export const login = (
-  db: Database.Database,
+export const login = async (
+  supa: SupabaseClient,
   email: string,
   password: string,
 ) => {
   console.log('🔐 [Auth] Login attempt:', email);
+  const user = await getUserByEmail(supa, email);
 
-  ensureSessionsTable(db);
-
-  let user = getUserByEmail(db, email);
-
-  // Create user if doesn't exist (for development)
   if (!user && (email === 'admin@cortexbuild.com' || email === 'manager@constructco.com')) {
     console.log('👤 [Auth] Creating development user');
-    user = createDevelopmentUser(db, email, password);
+    const devUser = await createDevelopmentUser(supa, email, password);
+    if (devUser) {
+      const token = jwt.sign({ userId: devUser.id, email: devUser.email }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
+      return { token, user: devUser };
+    }
   }
 
   if (!user) {
@@ -143,109 +141,50 @@ export const login = (
     throw new Error('Invalid email or password');
   }
 
-  const token = jwt.sign(
-    { userId: String(user.id), email: user.email } as JWTPayload,
-    JWT_SECRET,
-    { expiresIn: TOKEN_EXPIRY },
-  );
-
-  const sessionId = uuidv4();
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-
-  db.prepare(
-    'INSERT INTO sessions (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)',
-  ).run(sessionId, user.id, token, expiresAt.toISOString());
-
+  const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
   console.log('✅ [Auth] Login successful');
-
-  return {
-    token,
-    user: mapUserRow(user),
-  };
+  return { token, user };
 };
 
-export const register = (
-  db: Database.Database,
+export const register = async (
+  supa: SupabaseClient,
   email: string,
   password: string,
   name: string,
-  companyName: string,
+  _companyName: string,
 ) => {
   console.log('📝 [Auth] Registration attempt:', email);
 
-  const existingUser = getUserByEmail(db, email);
-
+  const existingUser = await getUserByEmail(supa, email);
   if (existingUser) {
     console.error('❌ [Auth] User already exists');
     throw new Error('User already exists');
   }
 
   const passwordHash = bcrypt.hashSync(password, 10);
-
-  const companyRecord = db
-    .prepare('SELECT id FROM companies WHERE LOWER(name) = LOWER(?)')
-    .get(companyName) as { id: number } | undefined;
-
-  let companyId: number;
-  if (companyRecord) {
-    companyId = companyRecord.id;
-  } else {
-    const insertCompany = db
-      .prepare(
-        'INSERT INTO companies (name, created_at, updated_at) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
-      )
-      .run(companyName);
-    companyId = Number(insertCompany.lastInsertRowid);
-  }
-
   const trimmedName = name.trim();
   const [firstName, ...rest] = trimmedName.split(' ');
-  const lastName = rest.length > 0 ? rest.join(' ') : firstName;
+  const lastName = rest.join(' ') || firstName;
 
-  const { hasPasswordHash } = getUserTableInfo(db);
-  const passwordColumn = hasPasswordHash ? 'password_hash' : 'password';
+  const { data: user, error: userError } = await supa
+    .from('users')
+    .insert({
+      email,
+      password: passwordHash,
+      first_name: firstName,
+      last_name: lastName,
+      role: 'user',
+      is_active: true,
+      email_verified: true,
+    })
+    .select()
+    .single();
 
-  const insertUser = db
-    .prepare(
-      `INSERT INTO users (
-        email,
-        ${passwordColumn},
-        first_name,
-        last_name,
-        role,
-        company_id,
-        is_active,
-        email_verified,
-        created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    )
-    .run(email, passwordHash, firstName, lastName, 'user', companyId);
+  if (userError) throw userError;
 
-  const userId = Number(insertUser.lastInsertRowid);
-  ensureSessionsTable(db);
-
-  const token = jwt.sign(
-    { userId: String(userId), email } as JWTPayload,
-    JWT_SECRET,
-    { expiresIn: TOKEN_EXPIRY },
-  );
-
-  const sessionId = uuidv4();
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-
-  db.prepare(
-    'INSERT INTO sessions (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)',
-  ).run(sessionId, userId, token, expiresAt.toISOString());
-
-  const user = getUserById(db, userId);
-
+  const token = jwt.sign({ userId: String(user.id), email }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
   console.log('✅ [Auth] User registered successfully');
-
-  return {
-    token,
-    user: mapUserRow(user),
-  };
+  return { token, user: mapUserRow(user)! };
 };
 
 export const verifyToken = (token: string): JWTPayload => {
@@ -256,145 +195,60 @@ export const verifyToken = (token: string): JWTPayload => {
   }
 };
 
-export const getCurrentUserByToken = (db: Database.Database, token: string) => {
+export const getCurrentUserByToken = async (supa: SupabaseClient, token: string) => {
   const payload = verifyToken(token);
-  const user = getUserById(db, payload.userId);
-
+  const user = await getUserById(supa, payload.userId);
   if (!user) {
     throw new Error('User not found');
   }
-
-  return mapUserRow(user);
+  return user;
 };
 
-export const logout = (db: Database.Database, token: string) => {
+export const logout = async (_supa: SupabaseClient, _token: string) => {
   console.log('👋 [Auth] Logout');
-  ensureSessionsTable(db);
-  db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
   return { success: true };
 };
 
 export const refreshToken = async (token: string) => {
   console.log('🔄 [Auth] Refreshing token');
-
-  const db = requireDb();
-  ensureSessionsTable(db);
-
+  const supa = requireSupa();
   const payload = verifyToken(token);
-  const user = getUserById(db, payload.userId);
-
+  const user = await getUserById(supa, payload.userId);
   if (!user) {
     throw new Error('User not found');
   }
-
-  const newToken = jwt.sign(
-    { userId: String(user.id), email: user.email } as JWTPayload,
-    JWT_SECRET,
-    { expiresIn: TOKEN_EXPIRY },
-  );
-
-  db.prepare(
-    'UPDATE sessions SET token = ?, expires_at = ? WHERE token = ?',
-  ).run(
-    newToken,
-    new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-    token,
-  );
-
+  const newToken = jwt.sign({ userId: String(user.id), email: user.email }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
   console.log('✅ [Auth] Token refreshed');
-
-  return {
-    token: newToken,
-    user: mapUserRow(user),
-  };
-};
-
-const createDevelopmentUser = (db: Database.Database, email: string, password: string) => {
-  console.log('👤 [Auth] Creating development user:', email);
-
-  const passwordHash = bcrypt.hashSync(password, 10);
-
-  // Get or create company
-  let companyId: number;
-  const companyName = email === 'admin@cortexbuild.com' ? 'CortexBuild' : 'ConstructCo';
-
-  const existingCompany = db
-    .prepare('SELECT id FROM companies WHERE LOWER(name) = LOWER(?)')
-    .get(companyName) as { id: number } | undefined;
-
-  if (existingCompany) {
-    companyId = existingCompany.id;
-  } else {
-    const insertCompany = db
-      .prepare('INSERT INTO companies (name, created_at, updated_at) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)')
-      .run(companyName);
-    companyId = Number(insertCompany.lastInsertRowid);
-  }
-
-  // Create user
-  const role = email === 'admin@cortexbuild.com' ? 'super_admin' : 'company_admin';
-  const name = email === 'admin@cortexbuild.com' ? 'System Administrator' : 'Project Manager';
-
-  const insertUser = db
-    .prepare(`
-      INSERT INTO users (
-        email,
-        password_hash,
-        first_name,
-        last_name,
-        role,
-        company_id,
-        is_active,
-        email_verified,
-        created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    `)
-    .run(email, passwordHash, name.split(' ')[0], name.split(' ')[1] || 'User', role, companyId);
-
-  const userId = Number(insertUser.lastInsertRowid);
-  return getUserById(db, userId);
+  return { token: newToken, user };
 };
 
 export const cleanupExpiredSessions = () => {
-  console.log('🧹 [Auth] Cleaning up expired sessions');
-  const db = requireDb();
-  ensureSessionsTable(db);
-  db.prepare("DELETE FROM sessions WHERE expires_at < datetime('now')").run();
+  // Supabase handles session expiry via auth; this is a no-op
+  console.log('🧹 [Auth] Cleanup not needed with Supabase');
 };
 
 export const getCurrentUser = async (req: any, res: any, next: any) => {
   const authHeader = req.headers?.authorization;
   const token = authHeader && authHeader.split(' ')[1];
-
   if (!token) {
-    return res
-      .status(401)
-      .json({ success: false, error: 'No token provided' });
+    return res.status(401).json({ success: false, error: 'No token provided' });
   }
-
   try {
-    const db = requireDb();
+    const supa = requireSupa();
     const payload = verifyToken(token);
-    const user = getUserById(db, payload.userId);
-
+    const user = await getUserById(supa, payload.userId);
     if (!user) {
       return res.status(401).json({ success: false, error: 'User not found' });
     }
-
-    const company = db
-      .prepare('SELECT name FROM companies WHERE id = ?')
-      .get(user.company_id) as { name?: string } | undefined;
-
+    const { data: company } = await supa.from('companies').select('name').eq('id', user.company_id || '').single();
     req.user = {
-      userId: String(user.id),
+      userId: user.id,
       email: user.email,
-      name: mapUserRow(user)?.name ?? user.email,
+      name: user.name ?? user.email,
       role: user.role,
       companyId: user.company_id,
       companyName: company?.name ?? 'Unknown Company',
     };
-
     next();
   } catch (error) {
     console.error('Token verification error:', error);
@@ -402,26 +256,20 @@ export const getCurrentUser = async (req: any, res: any, next: any) => {
   }
 };
 
-export const authenticateToken = (req: any, res: any, next: any) => {
+export const authenticateToken = async (req: any, res: any, next: any) => {
   const authHeader = req.headers?.authorization;
   const token = authHeader && authHeader.split(' ')[1];
-
   if (!token) {
-    return res
-      .status(401)
-      .json({ success: false, error: 'No token provided' });
+    return res.status(401).json({ success: false, error: 'No token provided' });
   }
-
   try {
-    const db = requireDb();
+    const supa = requireSupa();
     const payload = verifyToken(token);
-    const user = getUserById(db, payload.userId);
-
+    const user = await getUserById(supa, payload.userId);
     if (!user) {
       return res.status(401).json({ success: false, error: 'User not found' });
     }
-
-    req.user = mapUserRow(user);
+    req.user = user;
     next();
   } catch (error) {
     console.error('Token verification error:', error);

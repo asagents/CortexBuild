@@ -1,16 +1,17 @@
 /**
  * Advanced AI/ML API Routes for CortexBuild
  * Predictive analytics, intelligent automation, and ML-powered insights
+ * Migrated to Supabase
  */
 
 import { Router, Request, Response } from 'express';
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 import { AdvancedAIService } from '../services/advancedAI';
 import { getCurrentUser } from '../auth';
 
-export function createAdvancedAIRoutes(db: Database.Database): Router {
+export function createAdvancedAIRoutes(supabase: SupabaseClient): Router {
   const router = Router();
-  const aiService = new AdvancedAIService(db);
+  const aiService = new AdvancedAIService(supabase);
 
   // Middleware to ensure user is authenticated
   const requireAuth = (req: Request, res: Response, next: any) => {
@@ -163,25 +164,49 @@ export function createAdvancedAIRoutes(db: Database.Database): Router {
   router.get('/models/status', requireAuth, async (req: Request, res: Response) => {
     try {
       // Get AI model performance metrics
-      const modelMetrics = db.prepare(`
-        SELECT
-          model_name,
-          COUNT(*) as total_predictions,
-          AVG(confidence) as avg_confidence,
-          AVG(accuracy) as avg_accuracy,
-          MAX(created_at) as last_used
-        FROM ai_predictions
-        GROUP BY model_name
-        ORDER BY last_used DESC
-      `).all();
+      const { data: predictions, error } = await supabase
+        .from('ai_predictions')
+        .select('model_name, confidence, accuracy, created_at');
+
+      if (error) throw error;
+
+      const rows = predictions || [];
+      const modelMetrics: any = {};
+
+      rows.forEach((row: any) => {
+        const name = row.model_name || 'unknown';
+        if (!modelMetrics[name]) {
+          modelMetrics[name] = {
+            model_name: name,
+            total_predictions: 0,
+            confidence_sum: 0,
+            accuracy_sum: 0,
+            last_used: row.created_at
+          };
+        }
+        modelMetrics[name].total_predictions += 1;
+        modelMetrics[name].confidence_sum += row.confidence || 0;
+        modelMetrics[name].accuracy_sum += row.accuracy || 0;
+        if (row.created_at > modelMetrics[name].last_used) {
+          modelMetrics[name].last_used = row.created_at;
+        }
+      });
+
+      const models = Object.values(modelMetrics).map((m: any) => ({
+        model_name: m.model_name,
+        total_predictions: m.total_predictions,
+        avg_confidence: m.confidence_sum / m.total_predictions,
+        avg_accuracy: m.accuracy_sum / m.total_predictions,
+        last_used: m.last_used
+      }));
 
       res.json({
         success: true,
         data: {
-          models: modelMetrics,
-          totalPredictions: modelMetrics.reduce((sum, m) => sum + m.total_predictions, 0),
-          averageAccuracy: modelMetrics.length > 0
-            ? modelMetrics.reduce((sum, m) => sum + m.avg_accuracy, 0) / modelMetrics.length
+          models,
+          totalPredictions: models.reduce((sum: number, m: any) => sum + m.total_predictions, 0),
+          averageAccuracy: models.length > 0
+            ? models.reduce((sum: number, m: any) => sum + m.avg_accuracy, 0) / models.length
             : 0
         }
       });
@@ -199,8 +224,6 @@ export function createAdvancedAIRoutes(db: Database.Database): Router {
     try {
       const { modelType, trainingData } = req.body;
 
-      // This would trigger model retraining with new data
-      // For now, return success response
       res.json({
         success: true,
         message: 'Model training initiated',

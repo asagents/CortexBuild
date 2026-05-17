@@ -1,21 +1,15 @@
 /**
  * Codex MCP Bridge Service
- * 
+ *
  * Bridges the Python Codex MCP server with our TypeScript/Node.js application
  * Provides seamless integration between Codex CLI and CortexBuild platform
+ * Migrated to Supabase
  */
 
 import { spawn, ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
-import type { Database } from 'better-sqlite3';
-import { addContext, addMessage, getOrCreateSession, buildEnhancedPrompt } from './mcp.js';
-
-export interface CodexMCPConfig {
-  command: string;
-  args: string[];
-  timeout: number;
-  autoRestart: boolean;
-}
+import { SupabaseClient } from '@supabase/supabase-js';
+import { addContext, addMessage, getOrCreateSession, buildEnhancedPrompt } from './mcp';
 
 export interface CodexMessage {
   id: string;
@@ -34,17 +28,27 @@ export interface CodexSession {
 }
 
 export class CodexMCPBridge extends EventEmitter {
-  private db: Database.Database;
+  private supabase: SupabaseClient;
   private sessions: Map<string, CodexSession> = new Map();
-  private config: CodexMCPConfig;
+  private config: {
+    command: string;
+    args: string[];
+    timeout: number;
+    autoRestart: boolean;
+  };
 
-  constructor(db: Database.Database, config?: Partial<CodexMCPConfig>) {
+  constructor(supabase: SupabaseClient, config?: Partial<{
+    command: string;
+    args: string[];
+    timeout: number;
+    autoRestart: boolean;
+  }>) {
     super();
-    this.db = db;
+    this.supabase = supabase;
     this.config = {
       command: 'npx',
       args: ['-y', 'codex', 'mcp'],
-      timeout: 360000, // 6 minutes
+      timeout: 360000,
       autoRestart: true,
       ...config
     };
@@ -54,8 +58,8 @@ export class CodexMCPBridge extends EventEmitter {
    * Start a new Codex MCP session for a user
    */
   async startCodexSession(userId: string, sessionId?: string): Promise<string> {
-    const mcpSessionId = getOrCreateSession(this.db, userId, sessionId);
-    
+    const mcpSessionId = await getOrCreateSession(this.supabase, userId, sessionId);
+
     if (this.sessions.has(mcpSessionId)) {
       const session = this.sessions.get(mcpSessionId)!;
       if (session.isActive) {
@@ -64,7 +68,6 @@ export class CodexMCPBridge extends EventEmitter {
     }
 
     try {
-      // Spawn Codex MCP process
       const codexProcess = spawn(this.config.command, this.config.args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: {
@@ -84,17 +87,15 @@ export class CodexMCPBridge extends EventEmitter {
 
       this.sessions.set(mcpSessionId, session);
 
-      // Setup process event handlers
       this.setupProcessHandlers(session);
 
-      // Add session start context
-      addContext(this.db, mcpSessionId, userId, 'codex', {
+      await addContext(this.supabase, mcpSessionId, userId, 'codex', {
         action: 'session_started',
         timestamp: new Date().toISOString(),
         config: this.config
       });
 
-      addMessage(this.db, mcpSessionId, 'system', 'Codex MCP session started');
+      await addMessage(this.supabase, mcpSessionId, 'system', 'Codex MCP session started');
 
       console.log(`🤖 Codex MCP session started: ${mcpSessionId}`);
       this.emit('sessionStarted', { sessionId: mcpSessionId, userId });
@@ -116,23 +117,19 @@ export class CodexMCPBridge extends EventEmitter {
     }
 
     try {
-      // Build enhanced prompt with MCP context
-      const { messages, contexts } = buildEnhancedPrompt(
-        this.db,
+      const { messages, contexts } = await buildEnhancedPrompt(
+        this.supabase,
         sessionId,
         message,
         'You are Codex, an advanced AI coding assistant integrated with CortexBuild platform.'
       );
 
-      // Add user message to MCP
-      addMessage(this.db, sessionId, 'user', message);
+      await addMessage(this.supabase, sessionId, 'user', message);
 
-      // Add context if provided
       if (context) {
-        addContext(this.db, sessionId, session.userId, 'code', context);
+        await addContext(this.supabase, sessionId, session.userId, 'code', context);
       }
 
-      // Prepare Codex message
       const codexMessage: CodexMessage = {
         id: `msg_${Date.now()}`,
         method: 'chat',
@@ -144,20 +141,17 @@ export class CodexMCPBridge extends EventEmitter {
         }
       };
 
-      // Send to Codex process
       const response = await this.sendMessageToProcess(session, codexMessage);
 
-      // Add response to MCP
       if (response.result) {
-        addMessage(this.db, sessionId, 'assistant', response.result.content || JSON.stringify(response.result));
+        await addMessage(this.supabase, sessionId, 'assistant', response.result.content || JSON.stringify(response.result));
       }
 
       session.lastActivity = new Date();
       return response;
-
     } catch (error) {
       console.error('❌ Error sending to Codex:', error);
-      addMessage(this.db, sessionId, 'system', `Error: ${error}`);
+      await addMessage(this.supabase, sessionId, 'system', `Error: ${error}`);
       throw error;
     }
   }
@@ -182,20 +176,19 @@ export class CodexMCPBridge extends EventEmitter {
       }
     };
 
-    // Add execution context
-    addContext(this.db, sessionId, session.userId, 'code', {
+    await addContext(this.supabase, sessionId, session.userId, 'code', {
       action: 'code_execution',
       language,
-      code: code.substring(0, 500), // Truncate for storage
+      code: code.substring(0, 500),
       timestamp: new Date().toISOString()
     });
 
-    addMessage(this.db, sessionId, 'user', `Execute ${language} code: ${code.substring(0, 100)}...`);
+    await addMessage(this.supabase, sessionId, 'user', `Execute ${language} code: ${code.substring(0, 100)}...`);
 
     const response = await this.sendMessageToProcess(session, codexMessage);
 
     if (response.result) {
-      addMessage(this.db, sessionId, 'assistant', `Execution result: ${JSON.stringify(response.result)}`);
+      await addMessage(this.supabase, sessionId, 'assistant', `Execution result: ${JSON.stringify(response.result)}`);
     }
 
     return response;
@@ -221,19 +214,19 @@ export class CodexMCPBridge extends EventEmitter {
       }
     };
 
-    addContext(this.db, sessionId, session.userId, 'code', {
+    await addContext(this.supabase, sessionId, session.userId, 'code', {
       action: 'code_suggestion',
       prompt,
       context,
       timestamp: new Date().toISOString()
     });
 
-    addMessage(this.db, sessionId, 'user', `Code suggestion request: ${prompt}`);
+    await addMessage(this.supabase, sessionId, 'user', `Code suggestion request: ${prompt}`);
 
     const response = await this.sendMessageToProcess(session, codexMessage);
 
     if (response.result) {
-      addMessage(this.db, sessionId, 'assistant', `Code suggestions: ${JSON.stringify(response.result)}`);
+      await addMessage(this.supabase, sessionId, 'assistant', `Code suggestions: ${JSON.stringify(response.result)}`);
     }
 
     return response;
@@ -251,19 +244,18 @@ export class CodexMCPBridge extends EventEmitter {
     try {
       if (session.codexProcess && session.isActive) {
         session.codexProcess.kill('SIGTERM');
-        
-        // Wait for graceful shutdown
-        await new Promise((resolve) => {
+
+        await new Promise<void>((resolve) => {
           const timeout = setTimeout(() => {
             if (session.codexProcess) {
               session.codexProcess.kill('SIGKILL');
             }
-            resolve(void 0);
+            resolve();
           }, 5000);
 
           session.codexProcess!.on('exit', () => {
             clearTimeout(timeout);
-            resolve(void 0);
+            resolve();
           });
         });
       }
@@ -271,11 +263,10 @@ export class CodexMCPBridge extends EventEmitter {
       session.isActive = false;
       this.sessions.delete(sessionId);
 
-      addMessage(this.db, sessionId, 'system', 'Codex MCP session ended');
+      await addMessage(this.supabase, sessionId, 'system', 'Codex MCP session ended');
 
       console.log(`🛑 Codex MCP session stopped: ${sessionId}`);
       this.emit('sessionStopped', { sessionId });
-
     } catch (error) {
       console.error('❌ Error stopping Codex session:', error);
     }
@@ -329,7 +320,7 @@ export class CodexMCPBridge extends EventEmitter {
     session.codexProcess.on('exit', (code, signal) => {
       console.log(`🔚 Codex process exited [${session.sessionId}]: code=${code}, signal=${signal}`);
       session.isActive = false;
-      
+
       if (this.config.autoRestart && code !== 0) {
         console.log(`🔄 Auto-restarting Codex session: ${session.sessionId}`);
         setTimeout(() => {
@@ -361,7 +352,6 @@ export class CodexMCPBridge extends EventEmitter {
         reject(new Error('Codex request timeout'));
       }, this.config.timeout);
 
-      // Setup response handler
       const responseHandler = (data: Buffer) => {
         try {
           const response = JSON.parse(data.toString());
@@ -370,14 +360,13 @@ export class CodexMCPBridge extends EventEmitter {
             session.codexProcess!.stdout?.off('data', responseHandler);
             resolve(response);
           }
-        } catch (error) {
+        } catch {
           // Ignore parsing errors, might be partial data
         }
       };
 
       session.codexProcess.stdout?.on('data', responseHandler);
 
-      // Send message
       const messageStr = JSON.stringify(message) + '\n';
       session.codexProcess.stdin?.write(messageStr);
     });

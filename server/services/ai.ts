@@ -1,7 +1,10 @@
 // CortexBuild AI Service - Multi-Provider AI Integration
 // Handles all AI operations: code generation, chat, analysis, etc.
+// Migrated to Supabase
 
 import OpenAI from 'openai';
+import { SupabaseClient } from '@supabase/supabase-js';
+import * as mcp from './mcp';
 
 // Rate limiting tracker
 const rateLimitTracker = {
@@ -10,8 +13,6 @@ const rateLimitTracker = {
   resetTime: 0,
   isLimited: false
 };
-import Database from 'better-sqlite3';
-import * as mcp from './mcp';
 
 // Gemini AI Integration
 interface GeminiResponse {
@@ -26,19 +27,16 @@ interface GeminiResponse {
 function checkRateLimit(): boolean {
   const now = Date.now();
 
-  // Reset counter every hour
   if (now - rateLimitTracker.resetTime > 3600000) {
     rateLimitTracker.requestCount = 0;
     rateLimitTracker.resetTime = now;
     rateLimitTracker.isLimited = false;
   }
 
-  // Check if we're rate limited
-  if (rateLimitTracker.isLimited && now < rateLimitTracker.resetTime + 300000) { // 5 minute cooldown
+  if (rateLimitTracker.isLimited && now < rateLimitTracker.resetTime + 300000) {
     return false;
   }
 
-  // Check request frequency (max 10 per minute)
   if (now - rateLimitTracker.lastRequest < 6000 && rateLimitTracker.requestCount > 10) {
     rateLimitTracker.isLimited = true;
     return false;
@@ -48,12 +46,10 @@ function checkRateLimit(): boolean {
 }
 
 async function callGeminiAPI(message: string): Promise<string> {
-  // Check rate limiting first
   if (!checkRateLimit()) {
     throw new Error('Rate limit exceeded. Please try again later.');
   }
 
-  // Update rate limiting tracker
   rateLimitTracker.lastRequest = Date.now();
   rateLimitTracker.requestCount++;
 
@@ -77,13 +73,11 @@ async function callGeminiAPI(message: string): Promise<string> {
   if (!response.ok) {
     const errorText = await response.text();
 
-    // Handle rate limiting specifically
     if (response.status === 429) {
       console.log('⚠️ Gemini API rate limit reached, using fallback response');
       return 'I apologize, but I\'m currently experiencing high demand. Please try again in a few moments. In the meantime, I can help you with construction management best practices and general guidance.';
     }
 
-    // Handle other API errors
     console.error(`Gemini API error: ${response.status} ${response.statusText}`, errorText);
     throw new Error(`Gemini API error: ${response.status} ${response.statusText}`);
   }
@@ -94,11 +88,11 @@ async function callGeminiAPI(message: string): Promise<string> {
 
 // Initialize OpenAI clients with multiple API keys for load balancing
 const primaryOpenAI = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || 'sk-proj-test-key'
+  apiKey: process.env.OPENAI_API_KEY || '***'
 });
 
 const legacyOpenAI = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY_LEGACY || process.env.OPENAI_API_KEY || 'sk-proj-test-key'
+  apiKey: process.env.OPENAI_API_KEY_LEGACY || process.env.OPENAI_API_KEY || '***'
 });
 
 // API key rotation for SDK developer users
@@ -106,7 +100,6 @@ let useAlternateKey = false;
 
 export function getOpenAIClient(forSDKUser: boolean = false): OpenAI {
   if (forSDKUser) {
-    // Rotate between keys for SDK users to distribute load
     useAlternateKey = !useAlternateKey;
     return useAlternateKey ? legacyOpenAI : primaryOpenAI;
   }
@@ -129,29 +122,21 @@ interface AIRequest {
 }
 
 // Track AI usage in database
-export function trackAIUsage(db: Database.Database, request: AIRequest) {
+export async function trackAIUsage(supabase: SupabaseClient, request: AIRequest) {
   try {
-    db.prepare(`
-      INSERT INTO ai_requests (user_id, company_id, provider, model, request_type, prompt_tokens, completion_tokens, total_tokens, estimated_cost)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      request.userId,
-      request.companyId,
-      request.provider,
-      request.model,
-      request.requestType,
-      request.promptTokens,
-      request.completionTokens,
-      request.totalTokens,
-      request.estimatedCost
-    );
+    await supabase.from('ai_requests').insert({
+      user_id: request.userId,
+      company_id: request.companyId,
+      provider: request.provider,
+      model: request.model,
+      request_type: request.requestType,
+      prompt_tokens: request.promptTokens,
+      completion_tokens: request.completionTokens,
+      total_tokens: request.totalTokens,
+      estimated_cost: request.estimatedCost
+    });
 
-    // Update SDK developer usage
-    db.prepare(`
-      UPDATE sdk_developers 
-      SET api_requests_used = api_requests_used + 1 
-      WHERE user_id = ?
-    `).run(request.userId);
+    await supabase.rpc('increment_sdk_api_requests', { p_user_id: request.userId });
   } catch (error) {
     console.error('Failed to track AI usage:', error);
   }
@@ -174,7 +159,7 @@ export async function generateCode(
   prompt: string,
   userId: string,
   companyId: string,
-  db: Database.Database
+  supabase: SupabaseClient
 ): Promise<{ code: string; explanation: string }> {
   try {
     const completion = await openai.chat.completions.create({
@@ -202,14 +187,12 @@ Generate clean, production-ready code following these guidelines:
     });
 
     const response = completion.choices[0].message.content || '';
-    
-    // Extract code and explanation
+
     const codeMatch = response.match(/```(?:typescript|tsx|jsx)?\n([\s\S]*?)```/);
     const code = codeMatch ? codeMatch[1].trim() : response;
     const explanation = response.replace(/```(?:typescript|tsx|jsx)?\n[\s\S]*?```/g, '').trim();
 
-    // Track usage
-    trackAIUsage(db, {
+    await trackAIUsage(supabase, {
       userId,
       companyId,
       provider: 'openai',
@@ -234,17 +217,14 @@ export async function developerChat(
   conversationHistory: Array<{ role: string; content: string }>,
   userId: string,
   companyId: string,
-  db: Database.Database,
+  supabase: SupabaseClient,
   sessionId?: string
 ): Promise<{ response: string; sessionId: string }> {
   try {
-    // Get or create MCP session
-    const mcpSessionId = mcp.getOrCreateSession(db, userId, sessionId);
+    const mcpSessionId = await mcp.getOrCreateSession(supabase, userId, sessionId);
 
-    // Add user message to MCP session
-    mcp.addMessage(db, mcpSessionId, 'user', message);
+    await mcp.addMessage(supabase, mcpSessionId, 'user', message);
 
-    // Build enhanced prompt with MCP context
     const systemPrompt = `You are an expert CortexBuild SDK Developer Assistant specializing in construction management software development.
 
 Your capabilities:
@@ -276,8 +256,8 @@ Always provide:
 - Best practices for construction industry
 - Security and performance considerations`;
 
-    const { messages: enhancedMessages } = mcp.buildEnhancedPrompt(
-      db,
+    const { messages: enhancedMessages } = await mcp.buildEnhancedPrompt(
+      supabase,
       mcpSessionId,
       message,
       systemPrompt
@@ -292,11 +272,9 @@ Always provide:
 
     const response = completion.choices[0].message.content || 'I apologize, but I could not generate a response.';
 
-    // Add assistant response to MCP session
-    mcp.addMessage(db, mcpSessionId, 'assistant', response);
+    await mcp.addMessage(supabase, mcpSessionId, 'assistant', response);
 
-    // Track usage
-    trackAIUsage(db, {
+    await trackAIUsage(supabase, {
       userId,
       companyId,
       provider: 'openai',
@@ -308,16 +286,21 @@ Always provide:
       estimatedCost: calculateCost('gpt-4-turbo', completion.usage?.prompt_tokens || 0, completion.usage?.completion_tokens || 0)
     });
 
-    // Save to chat history (legacy)
-    db.prepare(`
-      INSERT INTO ai_chat_history (user_id, company_id, role, content, context_type)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(userId, companyId, 'user', message, 'developer');
+    await supabase.from('ai_chat_history').insert({
+      user_id: userId,
+      company_id: companyId,
+      role: 'user',
+      content: message,
+      context_type: 'developer'
+    });
 
-    db.prepare(`
-      INSERT INTO ai_chat_history (user_id, company_id, role, content, context_type)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(userId, companyId, 'assistant', response, 'developer');
+    await supabase.from('ai_chat_history').insert({
+      user_id: userId,
+      company_id: companyId,
+      role: 'assistant',
+      content: response,
+      context_type: 'developer'
+    });
 
     return { response, sessionId: mcpSessionId };
   } catch (error: any) {
@@ -331,7 +314,7 @@ export async function analyzeCode(
   code: string,
   userId: string,
   companyId: string,
-  db: Database.Database
+  supabase: SupabaseClient
 ): Promise<{ issues: string[]; suggestions: string[]; score: number }> {
   try {
     const completion = await openai.chat.completions.create({
@@ -353,8 +336,7 @@ export async function analyzeCode(
 
     const response = JSON.parse(completion.choices[0].message.content || '{}');
 
-    // Track usage
-    trackAIUsage(db, {
+    await trackAIUsage(supabase, {
       userId,
       companyId,
       provider: 'openai',
@@ -382,7 +364,7 @@ export async function generateTests(
   code: string,
   userId: string,
   companyId: string,
-  db: Database.Database
+  supabase: SupabaseClient
 ): Promise<string> {
   try {
     const completion = await openai.chat.completions.create({
@@ -403,8 +385,7 @@ export async function generateTests(
 
     const tests = completion.choices[0].message.content || '';
 
-    // Track usage
-    trackAIUsage(db, {
+    await trackAIUsage(supabase, {
       userId,
       companyId,
       provider: 'openai',
@@ -424,15 +405,15 @@ export async function generateTests(
 }
 
 // Add code context to MCP session
-export function addCodeContext(
-  db: Database.Database,
+export async function addCodeContext(
+  supabase: SupabaseClient,
   userId: string,
   sessionId: string,
   code: string,
   language: string = 'typescript',
   metadata: any = {}
-): string {
-  return mcp.addContext(db, sessionId, userId, 'code', {
+): Promise<string> {
+  return mcp.addContext(supabase, sessionId, userId, 'code', {
     code,
     language,
     timestamp: new Date().toISOString()
@@ -443,20 +424,20 @@ export function addCodeContext(
 }
 
 // Add project context to MCP session
-export function addProjectContext(
-  db: Database.Database,
+export async function addProjectContext(
+  supabase: SupabaseClient,
   userId: string,
   sessionId: string,
   projectData: any
-): string {
-  return mcp.addContext(db, sessionId, userId, 'project', projectData, {
+): Promise<string> {
+  return mcp.addContext(supabase, sessionId, userId, 'project', projectData, {
     tags: ['project', 'construction']
   });
 }
 
 // Get MCP session statistics
-export function getMCPStats(db: Database.Database, userId: string): any {
-  return mcp.getSessionStats(db, userId);
+export async function getMCPStats(supabase: SupabaseClient, userId: string): Promise<any> {
+  return mcp.getSessionStats(supabase, userId);
 }
 
 // Gemini Chat Function
@@ -467,7 +448,6 @@ export async function generateGeminiResponse(
   companyId: string
 ): Promise<string> {
   try {
-    // Create construction-focused prompt
     const constructionPrompt = `You are an AI assistant specialized in construction management and project coordination.
 
 User Context:
@@ -488,7 +468,6 @@ Focus on practical solutions, safety considerations, and industry best practices
   } catch (error: any) {
     console.error('Gemini chat error:', error);
 
-    // Check if it's a rate limiting error
     if (error.message && error.message.includes('429')) {
       return `I'm currently experiencing high demand and need to limit requests. Please try again in a few minutes.
 
@@ -501,7 +480,6 @@ While you wait, here are some quick construction management tips:
 For urgent matters, please contact your project manager directly.`;
     }
 
-    // General fallback message
     return `I apologize, but I'm currently unable to process your request. Please try again later.
 
 For immediate construction management assistance, consider:
@@ -513,4 +491,3 @@ For immediate construction management assistance, consider:
 Error: ${error.message}`;
   }
 }
-

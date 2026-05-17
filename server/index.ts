@@ -126,7 +126,7 @@ app.post('/api/auth/refresh', validateBody(refreshTokenSchema), async (req, res)
     try {
         const { token } = req.body;
 
-        const result = auth.refreshToken(db, token);
+        const result = await auth.refreshToken(token);
 
         res.json({
             success: true,
@@ -254,11 +254,11 @@ const startServer = async () => {
         // Register Auth routes
         console.log('🔐 Registering Auth routes...');
 
-        app.post('/api/auth/login', authRateLimit, validateBody(loginSchema), (req, res) => {
+        app.post('/api/auth/login', authRateLimit, validateBody(loginSchema), async (req, res) => {
             try {
                 const { email, password } = req.body;
 
-                const result = auth.login(db, email, password);
+                const result = await auth.login(supabase, email, password);
 
                 if (!result) {
                     return res.status(401).json({
@@ -281,11 +281,11 @@ const startServer = async () => {
             }
         });
 
-        app.post('/api/auth/register', authRateLimit, validateBody(registerSchema), (req, res) => {
+        app.post('/api/auth/register', authRateLimit, validateBody(registerSchema), async (req, res) => {
             try {
-                const { email, password, firstName, lastName, role, companyId } = req.body;
+                const { email, password, name, companyName } = req.body;
 
-                const result = auth.register(db, email, password, name, companyName);
+                const result = await auth.register(supabase, email, password, name, companyName);
 
                 res.json({
                     success: true,
@@ -306,7 +306,7 @@ const startServer = async () => {
                 const token = req.body?.token || req.headers.authorization?.replace('Bearer ', '') || '';
 
                 if (token && token.trim()) {
-                    auth.logout(db, token);
+                    auth.logout(supabase, token);
                 }
 
                 res.json({ success: true });
@@ -319,7 +319,7 @@ const startServer = async () => {
             }
         });
 
-        app.get('/api/auth/me', (req, res) => {
+        app.get('/api/auth/me', async (req, res) => {
             try {
                 const token = req.headers.authorization?.replace('Bearer ', '');
 
@@ -327,7 +327,7 @@ const startServer = async () => {
                     return res.status(401).json({ error: 'Token is required' });
                 }
 
-                const user = auth.getCurrentUserByToken(db, token);
+                const user = await auth.getCurrentUserByToken(supabase, token);
 
                 res.json({
                     success: true,
@@ -346,53 +346,53 @@ const startServer = async () => {
 
         // Register API routes
         console.log('📝 Registering API routes...');
-        const clientsRouter = createClientsRouter(db);
+        const clientsRouter = createClientsRouter(supabase);
         app.use('/api/clients', generalRateLimit, clientsRouter);
         console.log('  ✓ /api/clients');
 
         app.use('/api/projects', generalRateLimit, createProjectsRouter(supabase));
         console.log('  ✓ /api/projects');
 
-        app.use('/api/rfis', generalRateLimit, createRFIsRouter(db));
+        app.use('/api/rfis', generalRateLimit, createRFIsRouter(supabase));
         console.log('  ✓ /api/rfis');
 
-        app.use('/api/invoices', generalRateLimit, createInvoicesRouter(db));
+        app.use('/api/invoices', generalRateLimit, createInvoicesRouter(supabase));
         console.log('  ✓ /api/invoices');
 
-        app.use('/api/time-entries', generalRateLimit, createTimeEntriesRouter(db));
+        app.use('/api/time-entries', generalRateLimit, createTimeEntriesRouter(supabase));
         console.log('  ✓ /api/time-entries');
 
-        app.use('/api/subcontractors', generalRateLimit, createSubcontractorsRouter(db));
+        app.use('/api/subcontractors', generalRateLimit, createSubcontractorsRouter(supabase));
         console.log('  ✓ /api/subcontractors');
 
-        app.use('/api/purchase-orders', generalRateLimit, createPurchaseOrdersRouter(db));
+        app.use('/api/purchase-orders', generalRateLimit, createPurchaseOrdersRouter(supabase));
         console.log('  ✓ /api/purchase-orders');
 
-        app.use('/api/tasks', generalRateLimit, createTasksRouter(db));
+        app.use('/api/tasks', generalRateLimit, createTasksRouter(supabase));
         console.log('  ✓ /api/tasks');
 
-        app.use('/api/milestones', generalRateLimit, createMilestonesRouter(db));
+        app.use('/api/milestones', generalRateLimit, createMilestonesRouter(supabase));
         console.log('  ✓ /api/milestones');
 
-        app.use('/api/documents', generalRateLimit, createDocumentsRouter(db));
+        app.use('/api/documents', generalRateLimit, createDocumentsRouter(supabase));
         console.log('  ✓ /api/documents');
 
-        app.use('/api/modules', generalRateLimit, createModulesRouter(db));
+        app.use('/api/modules', generalRateLimit, createModulesRouter(supabase));
         console.log('  ✓ /api/modules');
 
-        app.use('/api/admin', adminRateLimit, createAdminRouter(db));
+        app.use('/api/admin', adminRateLimit, createAdminRouter(supabase));
         console.log('  ✓ /api/admin');
 
-        app.use('/api/marketplace', generalRateLimit, createMarketplaceRouter(db));
+        app.use('/api/marketplace', generalRateLimit, createMarketplaceRouter(supabase));
         console.log('  ✓ /api/marketplace');
 
-        app.use('/api/global-marketplace', generalRateLimit, createGlobalMarketplaceRouter(db));
+        app.use('/api/global-marketplace', generalRateLimit, createGlobalMarketplaceRouter(supabase));
         console.log('  ✓ /api/global-marketplace');
 
-        app.use('/api/widgets', generalRateLimit, createWidgetsRouter(db));
+        app.use('/api/widgets', generalRateLimit, createWidgetsRouter(supabase));
         console.log('  ✓ /api/widgets');
 
-        app.use('/api/smart-tools', generalRateLimit, createSmartToolsRouter(db));
+        app.use('/api/smart-tools', generalRateLimit, createSmartToolsRouter(supabase));
         console.log('  ✓ /api/smart-tools');
 
         app.use('/api/sdk', generalRateLimit, createSDKRouter(supabase));
@@ -401,16 +401,16 @@ const startServer = async () => {
         app.use('/api/admin/sdk', adminRateLimit, adminSDKRouter);
         console.log('  ✓ /api/admin/sdk');
 
-        app.use('/api/admin/enhanced', adminRateLimit, createEnhancedAdminRoutes(db));
+        app.use('/api/admin/enhanced', adminRateLimit, createEnhancedAdminRoutes(supabase));
         console.log('  ✓ /api/admin/enhanced');
 
-        app.use('/api/ai', generalRateLimit, createAIChatRoutes(db));
+        app.use('/api/ai', generalRateLimit, createAIChatRoutes(supabase));
         console.log('  ✓ /api/ai');
 
-        app.use('/api/developer', generalRateLimit, createDeveloperRoutes(db));
+        app.use('/api/developer', generalRateLimit, createDeveloperRoutes(supabase));
         console.log('  ✓ /api/developer');
 
-        app.use('/api/integrations', generalRateLimit, createIntegrationsRouter(db));
+        app.use('/api/integrations', generalRateLimit, createIntegrationsRouter(supabase));
         console.log('  ✓ /api/integrations');
 
         app.use('/api/agentkit', generalRateLimit, createAgentKitRouter(supabase));
@@ -419,13 +419,13 @@ const startServer = async () => {
         app.use('/api/workflows', generalRateLimit, createWorkflowsRouter(supabase));
         console.log('  ✓ /api/workflows');
 
-        app.use('/api/automations', generalRateLimit, createAutomationsRouter(db));
+        app.use('/api/automations', generalRateLimit, createAutomationsRouter(supabase));
         console.log('  ✓ /api/automations');
 
-        app.use('/api/my-apps', generalRateLimit, createMyApplicationsRouter(db));
+        app.use('/api/my-apps', generalRateLimit, createMyApplicationsRouter(supabase));
         console.log('  ✓ /api/my-applications');
 
-        app.use('/api/codex-mcp', generalRateLimit, createCodexMCPRoutes(db));
+        app.use('/api/codex-mcp', generalRateLimit, createCodexMCPRoutes(supabase));
         console.log('  ✓ /api/codex-mcp');
 
         // Tenant API routes
