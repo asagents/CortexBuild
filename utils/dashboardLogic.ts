@@ -86,9 +86,9 @@ export const calculateDashboardMetrics = (
     const activeProjects = projects.filter(p => p.status === 'In Progress').length;
     const completedProjects = projects.filter(p => p.status === 'Completed').length;
     const delayedProjects = projects.filter(p => {
-        const endDate = new Date(p.endDate);
+        const endDate = p.endDate ? new Date(p.endDate) : null;
         const today = new Date();
-        return p.status === 'In Progress' && endDate < today;
+        return p.status === 'In Progress' && endDate !== null && endDate < today;
     }).length;
 
     // Task Metrics
@@ -106,8 +106,12 @@ export const calculateDashboardMetrics = (
     }).length;
 
     // Financial Metrics
-    const totalBudget = projects.reduce((sum, p) => sum + p.budget, 0);
-    const spentBudget = projects.reduce((sum, p) => sum + (p.budget * (p.snapshot.budgetUtilization / 100)), 0);
+    const totalBudget = projects.reduce((sum, p) => sum + (p.budget || 0), 0);
+    const spentBudget = projects.reduce((sum, p) => {
+        const budget = p.budget || 0;
+        const utilization = p.snapshot?.budgetUtilization || 0;
+        return sum + (budget * (utilization / 100));
+    }, 0);
     const remainingBudget = totalBudget - spentBudget;
     const budgetUtilization = totalBudget > 0 ? (spentBudget / totalBudget) * 100 : 0;
 
@@ -116,7 +120,7 @@ export const calculateDashboardMetrics = (
         ? ((projects.length - delayedProjects) / projects.length) * 100 
         : 100;
     const budgetComplianceRate = projects.length > 0
-        ? (projects.filter(p => p.snapshot.budgetUtilization <= 100).length / projects.length) * 100
+        ? (projects.filter(p => (p.snapshot?.budgetUtilization || 0) <= 100).length / projects.length) * 100
         : 100;
     const taskCompletionRate = tasks.length > 0
         ? (completedTasks / tasks.length) * 100
@@ -247,7 +251,8 @@ export const generateInsights = (
 
     // Budget Overruns
     projects.forEach(project => {
-        if (project.snapshot.budgetUtilization > 90) {
+        const snapshotUtil = project.snapshot?.budgetUtilization || 0;
+        if (snapshotUtil > 90) {
             const prediction = predictions.get(project.id);
             insights.push({
                 projectId: project.id,
@@ -255,7 +260,7 @@ export const generateInsights = (
                 type: 'warning',
                 priority: 'high',
                 title: 'Budget Alert',
-                message: `${project.name} is at ${project.snapshot.budgetUtilization.toFixed(0)}% budget utilization.`,
+                message: `${project.name} is at ${snapshotUtil.toFixed(0)}% budget utilization.`,
                 prediction,
                 actionable: true,
                 suggestedAction: 'Review expenses and adjust budget forecast',

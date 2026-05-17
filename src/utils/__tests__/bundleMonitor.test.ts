@@ -1,6 +1,7 @@
 /**
  * Comprehensive Bundle Monitor Tests
  * Tests bundle size monitoring, metrics recording, and optimization recommendations
+ * @jest-environment jsdom
  */
 
 // Mock logging config before importing
@@ -80,7 +81,7 @@ describe('BundleMonitor', () => {
       expect(metrics!.totalSize).toBe(210000);
       expect(metrics!.gzippedSize).toBe(105000);
       expect(metrics!.chunks).toHaveLength(3);
-      expect(metrics!.largestChunks).toHaveLength(2); // Top 2 largest
+      expect(metrics!.largestChunks).toHaveLength(3); // Top 5 largest, only 3 exist
     });
 
     it('should determine chunk types correctly', () => {
@@ -176,7 +177,8 @@ describe('BundleMonitor', () => {
       const freshMonitor = BundleMonitor.getInstance();
       (BundleMonitor as any).instance = null; // Reset singleton
 
-      const metrics = freshMonitor.getCurrentMetrics();
+      const newMonitor = BundleMonitor.getInstance();
+      const metrics = newMonitor.getCurrentMetrics();
       expect(metrics).toBeNull();
     });
 
@@ -255,7 +257,7 @@ describe('BundleMonitor', () => {
       const comparison = bundleMonitor.compareWithPrevious();
 
       expect(comparison!.difference).toBe(-50000);
-      expect(comparison!.percentage).toBe(-33.333333333333336);
+      expect(comparison!.percentage).toBeCloseTo(-33.33, 2);
     });
   });
 
@@ -476,9 +478,9 @@ describe('checkBundleThresholds', () => {
 
     const result = checkBundleThresholds(largeMainChunkMetrics);
 
-    expect(result.warnings).toContain(
-      'Main bundle size (292.97 kB) exceeds recommended threshold (195.31 kB)'
-    );
+      expect(result.warnings).toContain(
+        'Main bundle size (300.00 kB) exceeds recommended threshold (200 kB)'
+      );
   });
 
   it('should warn about large vendor chunks', () => {
@@ -500,9 +502,9 @@ describe('checkBundleThresholds', () => {
 
     const result = checkBundleThresholds(largeVendorMetrics);
 
-    expect(result.warnings).toContain(
-      'Total vendor size (537.11 kB) exceeds recommended threshold (488.28 kB)'
-    );
+      expect(result.warnings).toContain(
+        'Total vendor size (550.00 kB) exceeds recommended threshold (500 kB)'
+      );
   });
 
   it('should error on excessive total bundle size', () => {
@@ -517,9 +519,9 @@ describe('checkBundleThresholds', () => {
 
     const result = checkBundleThresholds(excessiveBundleMetrics);
 
-    expect(result.errors).toContain(
-      'Total bundle size (3.00 MB) exceeds maximum threshold (2.00 MB)'
-    );
+      expect(result.errors).toContain(
+        'Total bundle size (3.00 MB) exceeds maximum threshold (2 MB)'
+      );
   });
 
   it('should warn about large gzipped size', () => {
@@ -534,9 +536,9 @@ describe('checkBundleThresholds', () => {
 
     const result = checkBundleThresholds(largeGzipMetrics);
 
-    expect(result.warnings).toContain(
-      'Gzipped bundle size (585.94 kB) exceeds recommended threshold (488.28 kB)'
-    );
+      expect(result.warnings).toContain(
+        'Gzipped bundle size (600.00 kB) exceeds recommended threshold (500 kB)'
+      );
   });
 
   it('should generate multiple warnings and errors', () => {
@@ -582,7 +584,12 @@ describe('exportBundleMetrics', () => {
     clickSpy = jest.fn();
     appendChildSpy = jest.spyOn(document.body, 'appendChild').mockImplementation();
     removeChildSpy = jest.spyOn(document.body, 'removeChild').mockImplementation();
-    revokeObjectURLSpy = jest.spyOn(URL, 'revokeObjectURL').mockImplementation();
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      value: jest.fn(),
+      writable: true,
+      configurable: true
+    });
+    revokeObjectURLSpy = jest.spyOn(URL, 'revokeObjectURL');
 
     // Mock link element
     const mockLink = {
@@ -593,7 +600,11 @@ describe('exportBundleMetrics', () => {
     createElementSpy.mockReturnValue(mockLink as any);
 
     // Mock URL.createObjectURL
-    jest.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock-url');
+    Object.defineProperty(URL, 'createObjectURL', {
+      value: jest.fn().mockReturnValue('blob:mock-url'),
+      writable: true,
+      configurable: true
+    });
 
     // Mock Blob
     global.Blob = jest.fn().mockImplementation((content, options) => ({

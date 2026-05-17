@@ -106,7 +106,7 @@ export function useEffectDebugger(
   dependencies: React.DependencyList,
   dependencyNames: string[] = []
 ): void {
-  const previousDeps = useRef<React.DependencyList>();
+  const previousDeps = useRef<React.DependencyList>(undefined);
   const changedDeps = useRef<string[]>([]);
 
   useEffect(() => {
@@ -132,7 +132,7 @@ export function useEffectDebugger(
 
 // Hook for detecting unnecessary re-renders
 export function useWhyDidYouUpdate(name: string, props: Record<string, any>): void {
-  const previousProps = useRef<Record<string, any>>();
+  const previousProps = useRef<Record<string, any>>(undefined);
 
   useEffect(() => {
     if (previousProps.current) {

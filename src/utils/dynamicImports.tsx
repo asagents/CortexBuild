@@ -70,7 +70,7 @@ export const loadReactFlow = (): Promise<any> => {
     });
   }
 
-  return reactFlowModule;
+  return reactFlowPromise;
 };
 
 export const ReactFlow: DynamicImport = {
@@ -96,7 +96,7 @@ export const loadGoogleAI = (): Promise<any> => {
     });
   }
 
-  return googleAIModule;
+  return googleAIPromise;
 };
 
 export const GoogleAI: DynamicImport = {
@@ -119,7 +119,7 @@ export const loadOpenAI = (): Promise<any> => {
     });
   }
 
-  return openAIModule;
+  return openAIPromise;
 };
 
 export const OpenAI: DynamicImport = {
@@ -142,7 +142,7 @@ export const loadSupabase = (): Promise<any> => {
     });
   }
 
-  return supabaseModule;
+  return supabasePromise;
 };
 
 export const Supabase: DynamicImport = {
@@ -165,7 +165,7 @@ export const loadAxios = (): Promise<any> => {
     });
   }
 
-  return axiosModule;
+  return axiosPromise;
 };
 
 export const Axios: DynamicImport = {
@@ -188,7 +188,7 @@ export const loadUUID = (): Promise<any> => {
     });
   }
 
-  return uuidModule;
+  return uuidPromise;
 };
 
 export const UUID: DynamicImport = {
@@ -262,6 +262,18 @@ export const preloadRouteDependencies = (route: string): Promise<void> => {
 
   const deps = routeDepMap[route] || [];
   return loadHeavyDependencies(deps);
+};
+
+// Reset utility for tests
+export const __resetModules = () => {
+  monacoPromise = null; monacoModule = null;
+  pdfPromise = null; pdfModule = null;
+  reactFlowPromise = null; reactFlowModule = null;
+  googleAIPromise = null; googleAIModule = null;
+  openAIPromise = null; openAIModule = null;
+  supabasePromise = null; supabaseModule = null;
+  axiosPromise = null; axiosModule = null;
+  uuidPromise = null; uuidModule = null;
 };
 
 // Export all dynamic imports for easy access

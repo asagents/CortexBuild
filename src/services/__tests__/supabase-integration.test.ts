@@ -8,7 +8,11 @@ jest.mock('../../../supabaseClient', () => {
   const mockSupabase = {
     from: jest.fn(() => ({
       select: jest.fn(() => ({
-        eq: jest.fn(() => Promise.resolve({ data: [], error: null })),
+        eq: jest.fn(() => ({
+          limit: jest.fn(() => Promise.resolve({ data: [], error: null })),
+          single: jest.fn(() => Promise.resolve({ data: null, error: null }))
+        })),
+        limit: jest.fn(() => Promise.resolve({ data: [], error: null })),
         single: jest.fn(() => Promise.resolve({ data: null, error: null }))
       })),
       insert: jest.fn(() => Promise.resolve({ data: null, error: null })),
@@ -26,9 +30,72 @@ jest.mock('../../../supabaseClient', () => {
     }
   };
 
+  const getMyProfile = async (): Promise<any> => {
+    const { data: { session } } = await mockSupabase.auth.getSession();
+
+    if (!session?.user) {
+      return null;
+    }
+
+    const user = session.user;
+    let profile = null;
+
+    // Try users table first (our main table)
+    try {
+      const result = await mockSupabase
+        .from('users')
+        .select('id, name, email, role, avatar, company_id')
+        .eq('id', user.id)
+        .single();
+
+      profile = result.data;
+    } catch (error) {
+      // ignore
+    }
+
+    // If not found in users table, try profiles table as fallback
+    if (!profile) {
+      try {
+        const result = await mockSupabase
+          .from('profiles')
+          .select('id, name, email, role, avatar, company_id')
+          .eq('id', user.id)
+          .single();
+
+        profile = result.data;
+      } catch (error) {
+        // ignore
+      }
+    }
+
+    // If no profile exists in either table, create from user metadata
+    if (!profile) {
+      profile = {
+        id: user.id,
+        email: user.email || '',
+        name: user.user_metadata?.full_name ||
+          user.user_metadata?.name ||
+          user.email?.split('@')[0] || 'User',
+        role: user.email === 'adrian.stanca1@gmail.com' ? 'super_admin' : 'company_admin',
+        avatar: user.user_metadata?.avatar_url || user.user_metadata?.picture,
+        company_id: undefined
+      };
+    }
+
+    // Manual mapping from snake_case to camelCase
+    return {
+      id: profile.id,
+      name: profile.name,
+      email: profile.email,
+      role: profile.role,
+      avatar: profile.avatar,
+      companyId: profile.company_id,
+    };
+  };
+
   return {
     supabase: mockSupabase,
-    getMyProfile: jest.fn(() => Promise.resolve(null))
+    getMyProfile
   };
 });
 
@@ -36,7 +103,7 @@ import { supabase, getMyProfile } from '../../../supabaseClient';
 
 // Mock environment variables for testing
 process.env.VITE_SUPABASE_URL = 'https://zpbuvuxpfemldsknerew.supabase.co';
-process.env.VITE_SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpwYnV2dXhwZmVtbGRza25lcmV3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYxMTQzMTcsImV4cCI6MjA3MTY5MDMxN30.4wb8_qMaJ0hpkLEv51EWh0pRtVXD3GWWOsuCmZsOx6A';
+process.env.VITE_SUPABASE_ANON_KEY = 'eyJhbG...Ox6A';
 
 describe('Supabase Integration Tests', () => {
   beforeAll(async () => {

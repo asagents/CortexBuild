@@ -70,7 +70,7 @@ export class BundleMonitor {
     }
 
     // Log to console in development
-    if (isDev()) {
+    if (process?.env?.NODE_ENV === 'development' || (global as any).import?.meta?.env?.DEV) {
       console.group('📦 Bundle Analysis');
       console.log(`Total Size: ${(totalSize / 1024).toFixed(2)} kB`);
       console.log(`Gzipped: ${(gzippedSize / 1024).toFixed(2)} kB`);

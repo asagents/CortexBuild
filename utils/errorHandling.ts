@@ -107,7 +107,7 @@ export class APIError extends AppError {
  * In production, this would send to error tracking service (Sentry, LogRocket, etc.)
  */
 export class ErrorLogger {
-    private static isDevelopment = import.meta.env.DEV;
+    private static isDevelopment = typeof process !== 'undefined' && process.env && process.env.NODE_ENV === 'development';
 
     static log(error: Error | AppError, context?: Record<string, any>): void {
         const errorInfo = {

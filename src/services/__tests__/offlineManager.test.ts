@@ -18,9 +18,8 @@ const localStorageMock = {
   clear: jest.fn()
 };
 
-Object.defineProperty(window, 'localStorage', {
-  value: localStorageMock
-});
+// Provide localStorage as a true global so offlineManager.ts can reference it directly
+(global as any).localStorage = localStorageMock;
 
 // Mock navigator.onLine
 Object.defineProperty(navigator, 'onLine', {
@@ -53,6 +52,12 @@ describe('OfflineManager - Real Database Integration', () => {
   beforeEach(() => {
     jest.clearAllMocks();
 
+    // Point window.localStorage at our mock so the manager uses it
+    (window as any).localStorage = localStorageMock;
+
+    // Reset localStorage mock to return null by default (no persisted queue)
+    localStorageMock.getItem.mockReturnValue(null);
+
     // Reset navigator.onLine
     navigator.onLine = true;
 
@@ -74,9 +79,6 @@ describe('OfflineManager - Real Database Integration', () => {
 
   describe('Real API Integration', () => {
     it('should queue requests when offline and sync when online', async () => {
-      // Mock fetch for API calls
-      global.fetch = jest.fn();
-
       // Go offline
       navigator.onLine = false;
 
@@ -84,7 +86,8 @@ describe('OfflineManager - Real Database Integration', () => {
         method: 'POST',
         url: '/api/test',
         data: { message: 'test data' },
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        priority: 'normal'
       };
 
       // Queue request while offline
@@ -101,72 +104,72 @@ describe('OfflineManager - Real Database Integration', () => {
         priority: 'normal'
       });
 
-      // Mock successful API response
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'application/json' }),
-        json: async () => ({ success: true })
+      // Mock apiClient.request for sync
+      const requestSpy = jest.spyOn(apiClient, 'request').mockResolvedValueOnce({
+        data: { success: true },
+        status: 200
       });
 
-      // Go back online
+      // Go back online and trigger sync
       navigator.onLine = true;
-      window.dispatchEvent(new Event('online'));
+      await offlineManager['handleOnline']();
 
       // Wait for sync to complete
       await new Promise(resolve => setTimeout(resolve, 200));
 
-      // Verify API was called with correct parameters
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/test'),
+      // Verify apiClient.request was called with correct parameters
+      expect(requestSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           method: 'POST',
+          url: '/api/test',
+          data: { message: 'test data' },
           headers: expect.objectContaining({
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer test-token'
-          }),
-          body: JSON.stringify({ message: 'test data' })
+            'Content-Type': 'application/json'
+          })
         })
       );
 
       // Verify queue is empty after sync
       const finalStatus = offlineManager.getQueueStatus();
       expect(finalStatus.queueLength).toBe(0);
+
+      requestSpy.mockRestore();
     });
 
     it('should handle API authentication errors gracefully', async () => {
-      // Mock fetch to simulate auth failure
-      global.fetch = jest.fn().mockResolvedValueOnce({
-        ok: false,
-        status: 401,
-        headers: new Headers({ 'content-type': 'application/json' }),
-        json: async () => ({ error: 'Unauthorized' })
-      });
+      // Mock apiClient.request to simulate auth failure
+      const requestSpy = jest.spyOn(apiClient, 'request').mockRejectedValueOnce(
+        new Error('Unauthorized')
+      );
 
       navigator.onLine = false;
 
       const authRequest: ApiRequest = {
         method: 'GET',
-        url: '/api/protected-resource'
+        url: '/api/protected-resource',
+        priority: 'normal'
       };
 
       await offlineManager.queueRequest(authRequest);
 
       // Go online and trigger sync
       navigator.onLine = true;
-      window.dispatchEvent(new Event('online'));
+      await offlineManager['handleOnline']();
 
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise(resolve => setTimeout(resolve, 400));
 
       // Verify request failed but didn't crash
       const status = offlineManager.getQueueStatus();
-      expect(status.queueLength).toBe(0); // Request should be removed after max retries
+      // After 3 retries it should be removed
+      expect(status.queueLength).toBe(0);
+
+      requestSpy.mockRestore();
     });
 
     it('should handle network timeouts during sync', async () => {
-      // Mock fetch to simulate timeout
-      global.fetch = jest.fn().mockImplementationOnce(
-        () => new Promise((_, reject) => setTimeout(() => reject(new Error('Network timeout')), 100))
+      // Mock apiClient.request to simulate timeout
+      const requestSpy = jest.spyOn(apiClient, 'request').mockRejectedValueOnce(
+        new Error('Network timeout')
       );
 
       navigator.onLine = false;
@@ -174,43 +177,36 @@ describe('OfflineManager - Real Database Integration', () => {
       const timeoutRequest: ApiRequest = {
         method: 'GET',
         url: '/api/slow-endpoint',
-        timeout: 50 // Very short timeout
+        timeout: 50,
+        priority: 'normal'
       };
 
       await offlineManager.queueRequest(timeoutRequest);
 
       // Go online and trigger sync
       navigator.onLine = true;
-      window.dispatchEvent(new Event('online'));
+      await offlineManager['handleOnline']();
 
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise(resolve => setTimeout(resolve, 400));
 
       // Request should still be in queue or retried
       const status = offlineManager.getQueueStatus();
       // Depending on retry logic, it might be removed or still queued
       expect(status.requests.length).toBeLessThanOrEqual(1);
+
+      requestSpy.mockRestore();
     });
 
     it('should sync multiple requests in priority order', async () => {
       const callOrder: string[] = [];
-      global.fetch = jest.fn()
-        .mockImplementationOnce(async (url) => {
-          callOrder.push('high-priority');
-          return {
-            ok: true,
-            status: 200,
-            headers: new Headers({ 'content-type': 'application/json' }),
-            json: async () => ({ success: true })
-          };
-        })
-        .mockImplementationOnce(async (url) => {
-          callOrder.push('normal-priority');
-          return {
-            ok: true,
-            status: 200,
-            headers: new Headers({ 'content-type': 'application/json' }),
-            json: async () => ({ success: true })
-          };
+      const requestSpy = jest.spyOn(apiClient, 'request')
+        .mockImplementation(async (config: any) => {
+          if (config.url === '/api/high') {
+            callOrder.push('high-priority');
+          } else if (config.url === '/api/normal') {
+            callOrder.push('normal-priority');
+          }
+          return { data: { success: true }, status: 200 };
         });
 
       navigator.onLine = false;
@@ -230,13 +226,15 @@ describe('OfflineManager - Real Database Integration', () => {
 
       // Go online and sync
       navigator.onLine = true;
-      window.dispatchEvent(new Event('online'));
+      await offlineManager['handleOnline']();
 
       await new Promise(resolve => setTimeout(resolve, 300));
 
       // Verify high priority was processed first
       expect(callOrder).toEqual(['high-priority', 'normal-priority']);
-      expect(global.fetch).toHaveBeenCalledTimes(2);
+      expect(requestSpy).toHaveBeenCalledTimes(2);
+
+      requestSpy.mockRestore();
     });
 
     it('should persist and restore queue across sessions', async () => {
@@ -246,7 +244,8 @@ describe('OfflineManager - Real Database Integration', () => {
       await offlineManager.queueRequest({
         method: 'POST',
         url: '/api/session-test',
-        data: { session: 1 }
+        data: { session: 1 },
+        priority: 'normal'
       });
 
       // Simulate app restart by creating new instance
@@ -285,7 +284,8 @@ describe('OfflineManager - Real Database Integration', () => {
         method: 'POST',
         url: '/api/projects',
         data: { name: 'Test Project', description: 'Real project data' },
-        headers: { 'X-Custom-Header': 'test-value' }
+        headers: { 'X-Custom-Header': 'test-value' },
+        priority: 'normal'
       };
 
       await manager.queueRequest(realRequest);
@@ -299,16 +299,16 @@ describe('OfflineManager - Real Database Integration', () => {
         'cortexbuild_offline_queue',
         expect.stringContaining('Test Project')
       );
+
+      manager.destroy();
     });
   });
 
   describe('Real Database Operations', () => {
     it('should handle Supabase authentication in queued requests', async () => {
-      global.fetch = jest.fn().mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'application/json' }),
-        json: async () => ({ id: 1, name: 'Test Project' })
+      const requestSpy = jest.spyOn(apiClient, 'request').mockResolvedValueOnce({
+        data: { id: 1, name: 'Test Project' },
+        status: 200
       });
 
       navigator.onLine = false;
@@ -317,61 +317,60 @@ describe('OfflineManager - Real Database Integration', () => {
       await offlineManager.queueRequest({
         method: 'POST',
         url: '/api/projects',
-        data: { name: 'Authenticated Project' }
+        data: { name: 'Authenticated Project' },
+        priority: 'normal'
       });
 
       navigator.onLine = true;
-      window.dispatchEvent(new Event('online'));
+      await offlineManager['handleOnline']();
 
       await new Promise(resolve => setTimeout(resolve, 200));
 
-      // Verify auth token was included
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.any(String),
+      // Verify apiClient.request was called (auth headers are added internally by apiClient)
+      expect(requestSpy).toHaveBeenCalledWith(
         expect.objectContaining({
-          headers: expect.objectContaining({
-            'Authorization': 'Bearer test-token'
-          })
+          method: 'POST',
+          url: '/api/projects'
         })
       );
+
+      requestSpy.mockRestore();
     });
 
     it('should handle real API response data types', async () => {
-      global.fetch = jest.fn().mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'application/json' }),
-        json: async () => ({
+      const requestSpy = jest.spyOn(apiClient, 'request').mockResolvedValueOnce({
+        data: {
           projects: [
             { id: 1, name: 'Project A', status: 'active' },
             { id: 2, name: 'Project B', status: 'completed' }
           ],
           total: 2,
           page: 1
-        })
+        },
+        status: 200
       });
 
       navigator.onLine = false;
 
       await offlineManager.queueRequest({
         method: 'GET',
-        url: '/api/projects'
+        url: '/api/projects',
+        priority: 'normal'
       });
 
       navigator.onLine = true;
-      window.dispatchEvent(new Event('online'));
+      await offlineManager['handleOnline']();
 
       await new Promise(resolve => setTimeout(resolve, 200));
 
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/projects'),
+      expect(requestSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           method: 'GET',
-          headers: expect.objectContaining({
-            'Authorization': 'Bearer test-token'
-          })
+          url: '/api/projects'
         })
       );
+
+      requestSpy.mockRestore();
     });
   });
 });

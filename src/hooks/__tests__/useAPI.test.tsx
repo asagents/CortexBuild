@@ -106,6 +106,18 @@ describe('useAPI Hook', () => {
   });
 
   describe('Caching', () => {
+    beforeAll(() => {
+      jest.useFakeTimers();
+    });
+
+    afterAll(() => {
+      jest.useRealTimers();
+    });
+
+    beforeEach(() => {
+      clearCache();
+    });
+
     it('should cache successful responses', async () => {
       const mockData = { users: ['John', 'Jane'] };
       const mockApiCall = jest.fn().mockResolvedValue(mockData);
@@ -269,28 +281,38 @@ describe('useAPI Hook', () => {
 
   describe('Retry Logic', () => {
     it('should auto-retry on retryable errors when enabled', async () => {
-      const mockError = {
-        code: 'NETWORK_ERROR',
-        message: 'Network error',
-        userMessage: 'Please check your connection',
-        retryable: true,
-        timestamp: new Date().toISOString()
-      };
-      const mockData = { success: true };
-      const mockApiCall = jest.fn()
-        .mockRejectedValueOnce(mockError)
-        .mockResolvedValueOnce(mockData);
+      jest.useFakeTimers();
+      try {
+        const mockError = {
+          code: 'NETWORK_ERROR',
+          message: 'Network error',
+          userMessage: 'Please check your connection',
+          retryable: true,
+          timestamp: new Date().toISOString()
+        };
+        const mockData = { success: true };
+        const mockApiCall = jest.fn()
+          .mockRejectedValueOnce(mockError)
+          .mockResolvedValueOnce(mockData);
 
-      const { result } = renderHook(() => useAPI(mockApiCall, { retryOnError: true }));
+        const { result } = renderHook(() => useAPI(mockApiCall, { retryOnError: true }));
 
-      await act(async () => {
-        await result.current.execute();
-      });
+        await act(async () => {
+          await result.current.execute();
+        });
 
-      // Should have been called twice (initial + retry)
-      expect(mockApiCall).toHaveBeenCalledTimes(2);
-      expect(result.current.data).toEqual(mockData);
-      expect(result.current.error).toBeNull();
+        jest.advanceTimersByTime(2000);
+        await act(async () => {
+          await Promise.resolve();
+        });
+
+        // Should have been called twice (initial + retry)
+        expect(mockApiCall).toHaveBeenCalledTimes(2);
+        expect(result.current.data).toEqual(mockData);
+        expect(result.current.error).toBeNull();
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('should not auto-retry when disabled', async () => {

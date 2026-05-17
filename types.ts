@@ -54,6 +54,7 @@ export interface ProjectSnapshot {
     overdueTasks: number;
     pendingTMTickets: number;
     aiRiskLevel: string;
+    budgetUtilization?: number;
 }
 
 export interface ProjectContact {

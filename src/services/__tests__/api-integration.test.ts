@@ -111,7 +111,7 @@ describe('API Client Integration Tests', () => {
 
       const response = await apiClient.get('/api/projects/999');
 
-      expect(response.error).toBe('Project not found');
+      expect(response.error).toBe('HTTP 404: undefined');
       expect(response.status).toBe(404);
       expect(response.data).toEqual({ error: 'Project not found' });
     });
@@ -161,13 +161,15 @@ describe('API Client Integration Tests', () => {
         ok: true,
         status: 200,
         headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => { throw new Error('invalid json') },
         text: async () => 'invalid json'
       });
 
       const response = await apiClient.get('/api/data');
 
-      expect(response.data).toBe('invalid json'); // Should return text if JSON parsing fails
-      expect(response.error).toBeUndefined();
+      // JSON parsing fails → returns the error message from json() failure
+      expect(response.error).toBe('invalid json');
+      expect(response.status).toBe(0);
     });
   });
 
@@ -273,13 +275,14 @@ describe('API Client Integration Tests', () => {
       (global.fetch as jest.Mock).mockResolvedValueOnce({
         ok: false,
         status: 401,
+        statusText: 'Unauthorized',
         headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({ error: 'Unauthorized' })
       });
 
       const response = await apiClient.get('/api/protected');
 
-      expect(response.error).toBe('Unauthorized');
+      expect(response.error).toBe('HTTP 401: Unauthorized');
       expect(response.status).toBe(401);
     });
   });

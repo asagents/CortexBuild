@@ -60,7 +60,7 @@ export function useAPI<T = any>(
 
   // Refs
   const mountedRef = useRef(true);
-  const argsRef = useRef<any[]>([]);
+  const argsRef = useRef<any[] | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   /**
@@ -149,7 +149,7 @@ export function useAPI<T = any>(
    * Retry last failed request
    */
   const retry = useCallback(async (): Promise<T | null> => {
-    if (!argsRef.current || argsRef.current.length === 0) {
+    if (!argsRef.current) {
       console.warn('[useAPI] No previous request to retry');
       return null;
     }
