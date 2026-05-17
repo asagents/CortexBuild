@@ -101,7 +101,7 @@ export class QuantumUserService {
       encryptionLevel: 'quantum'
     });
 
-    this.jwtSecret = process.env.JWT_SECRET || 'quantum-secret-key-change-in-production';
+    this.jwtSecret = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
     this.quantumEncryption = true;
 
     console.log('🔐 Quantum User Service initialized');
