@@ -6,9 +6,9 @@ import { logger } from '../utils/logger';
  * Extends native Error with status code and operational flag
  */
 export class AppError extends Error {
-  public readonly statusCode: number;
-  public readonly isOperational: boolean;
-  public readonly timestamp: string;
+  public statusCode: number;
+  public isOperational: boolean;
+  public timestamp: string;
 
   constructor(
     message: string,
@@ -160,16 +160,19 @@ export const globalErrorHandler = (
   }
 
   // Log error details
-  logger.error({
-    name: error.name,
-    message: error.message,
-    statusCode: error.statusCode,
-    stack: error.stack,
-    url: req.originalUrl,
-    method: req.method,
-    ip: req.ip,
-    user: (req as any).user?.id || 'anonymous',
-  });
+  logger.error(
+    `HTTP ${error.statusCode} ${error.name} on ${req.method} ${req.originalUrl}`,
+    {
+      name: error.name,
+      message: error.message,
+      statusCode: error.statusCode,
+      stack: error.stack,
+      url: req.originalUrl,
+      method: req.method,
+      ip: req.ip,
+      user: (req as any).user?.id || 'anonymous',
+    }
+  );
 
   // Send appropriate response based on environment
   if (process.env.NODE_ENV === 'development') {

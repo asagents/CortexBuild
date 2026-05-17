@@ -3,7 +3,7 @@
  * Safe wrapper for logging activities to the database
  */
 
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface ActivityLogParams {
@@ -21,7 +21,7 @@ export interface ActivityLogParams {
  * Safely log an activity to the database
  * Returns true if successful, false if failed
  */
-export function logActivity(db: Database.Database, params: ActivityLogParams): boolean {
+export async function logActivity(supabase: SupabaseClient, params: ActivityLogParams): Promise<boolean> {
   try {
     const {
       user_id,
@@ -43,23 +43,24 @@ export function logActivity(db: Database.Database, params: ActivityLogParams): b
     // Prepare metadata as JSON string if provided
     const metadataJson = metadata ? JSON.stringify(metadata) : null;
 
-    // Insert activity
-    db.prepare(`
-      INSERT INTO activities (
-        id, user_id, company_id, project_id, action, description,
-        entity_type, entity_id, metadata, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    `).run(
-      uuidv4(),
-      user_id,
-      company_id || null,
-      project_id ? String(project_id) : null,
-      action,
-      description,
-      entity_type || null,
-      entity_id ? String(entity_id) : null,
-      metadataJson
-    );
+    const { error } = await supabase
+      .from('activities')
+      .insert({
+        id: uuidv4(),
+        user_id,
+        company_id: company_id || null,
+        project_id: project_id ? String(project_id) : null,
+        action,
+        description,
+        entity_type: entity_type || null,
+        entity_id: entity_id ? String(entity_id) : null,
+        metadata: metadataJson,
+      });
+
+    if (error) {
+      console.warn('[Activity Logger] Failed to log activity:', error.message);
+      return false;
+    }
 
     return true;
   } catch (error: any) {
@@ -71,14 +72,14 @@ export function logActivity(db: Database.Database, params: ActivityLogParams): b
 /**
  * Log a project-related activity
  */
-export function logProjectActivity(
-  db: Database.Database,
+export async function logProjectActivity(
+  supabase: SupabaseClient,
   user_id: string,
   project_id: number | string,
   action: string,
   description: string
-): boolean {
-  return logActivity(db, {
+): Promise<boolean> {
+  return logActivity(supabase, {
     user_id,
     project_id,
     entity_type: 'project',
@@ -91,13 +92,13 @@ export function logProjectActivity(
 /**
  * Log a user-related activity
  */
-export function logUserActivity(
-  db: Database.Database,
+export async function logUserActivity(
+  supabase: SupabaseClient,
   user_id: string,
   action: string,
   description: string
-): boolean {
-  return logActivity(db, {
+): Promise<boolean> {
+  return logActivity(supabase, {
     user_id,
     action,
     description,
@@ -109,14 +110,14 @@ export function logUserActivity(
 /**
  * Log a company-related activity
  */
-export function logCompanyActivity(
-  db: Database.Database,
+export async function logCompanyActivity(
+  supabase: SupabaseClient,
   user_id: string,
   company_id: string,
   action: string,
   description: string
-): boolean {
-  return logActivity(db, {
+): Promise<boolean> {
+  return logActivity(supabase, {
     user_id,
     company_id,
     action,

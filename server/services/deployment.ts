@@ -1,10 +1,9 @@
 // CortexBuild Deployment Service
 // Handles app deployment, version control, and hosting
+// Migrated to Supabase
 
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
 
 interface DeploymentConfig {
   appId: string;
@@ -25,61 +24,62 @@ interface DeploymentResult {
 
 // Create a new deployment
 export async function createDeployment(
-  db: Database.Database,
+  supabase: SupabaseClient,
   config: DeploymentConfig,
   userId: string
 ): Promise<DeploymentResult> {
   const deploymentId = `deploy-${crypto.randomBytes(8).toString('hex')}`;
-  
+
   try {
     // Insert deployment record
-    db.prepare(`
-      INSERT INTO deployments (
-        id, app_id, user_id, version, environment, status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-    `).run(
-      deploymentId,
-      config.appId,
-      userId,
-      config.version,
-      config.environment,
-      'pending'
-    );
+    await supabase
+      .from('deployments')
+      .insert({
+        id: deploymentId,
+        app_id: config.appId,
+        user_id: userId,
+        version: config.version,
+        environment: config.environment,
+        status: 'pending',
+        created_at: new Date().toISOString()
+      });
 
     // Simulate deployment process
     const logs: string[] = [];
     logs.push(`[${new Date().toISOString()}] Deployment initiated`);
     logs.push(`[${new Date().toISOString()}] Environment: ${config.environment}`);
     logs.push(`[${new Date().toISOString()}] Version: ${config.version}`);
-    
+
     // Update status to building
-    updateDeploymentStatus(db, deploymentId, 'building');
+    await updateDeploymentStatus(supabase, deploymentId, 'building');
     logs.push(`[${new Date().toISOString()}] Building application...`);
-    
+
     // Simulate build process
     await new Promise(resolve => setTimeout(resolve, 2000));
-    
+
     // Update status to deploying
-    updateDeploymentStatus(db, deploymentId, 'deploying');
+    await updateDeploymentStatus(supabase, deploymentId, 'deploying');
     logs.push(`[${new Date().toISOString()}] Deploying to ${config.environment}...`);
-    
+
     // Simulate deployment
     await new Promise(resolve => setTimeout(resolve, 1500));
-    
+
     // Generate deployment URL
     const url = `https://${config.appId}-${config.environment}.cortexbuild.app`;
-    
+
     // Update status to success
-    updateDeploymentStatus(db, deploymentId, 'success', url);
+    await updateDeploymentStatus(supabase, deploymentId, 'success', url);
     logs.push(`[${new Date().toISOString()}] Deployment successful!`);
     logs.push(`[${new Date().toISOString()}] URL: ${url}`);
-    
+
     // Store deployment logs
-    db.prepare(`
-      UPDATE deployments 
-      SET logs = ?, deployed_url = ?
-      WHERE id = ?
-    `).run(JSON.stringify(logs), url, deploymentId);
+    await supabase
+      .from('deployments')
+      .update({
+        logs: JSON.stringify(logs),
+        deployed_url: url
+      })
+      .eq('id', deploymentId);
 
     return {
       deploymentId,
@@ -89,8 +89,8 @@ export async function createDeployment(
     };
   } catch (error: any) {
     // Update status to failed
-    updateDeploymentStatus(db, deploymentId, 'failed');
-    
+    await updateDeploymentStatus(supabase, deploymentId, 'failed');
+
     return {
       deploymentId,
       status: 'failed',
@@ -101,57 +101,62 @@ export async function createDeployment(
 }
 
 // Update deployment status
-function updateDeploymentStatus(
-  db: Database.Database,
+async function updateDeploymentStatus(
+  supabase: SupabaseClient,
   deploymentId: string,
   status: string,
   url?: string
 ) {
+  const updates: any = {
+    status,
+    updated_at: new Date().toISOString()
+  };
   if (url) {
-    db.prepare(`
-      UPDATE deployments 
-      SET status = ?, deployed_url = ?, updated_at = datetime('now')
-      WHERE id = ?
-    `).run(status, url, deploymentId);
-  } else {
-    db.prepare(`
-      UPDATE deployments 
-      SET status = ?, updated_at = datetime('now')
-      WHERE id = ?
-    `).run(status, deploymentId);
+    updates.deployed_url = url;
   }
+
+  await supabase
+    .from('deployments')
+    .update(updates)
+    .eq('id', deploymentId);
 }
 
 // Get deployment status
-export function getDeployment(
-  db: Database.Database,
+export async function getDeployment(
+  supabase: SupabaseClient,
   deploymentId: string
-): any {
-  const deployment = db.prepare(`
-    SELECT * FROM deployments WHERE id = ?
-  `).get(deploymentId);
-  
-  if (deployment && (deployment as any).logs) {
-    (deployment as any).logs = JSON.parse((deployment as any).logs);
+): Promise<any> {
+  const { data: deployment, error } = await supabase
+    .from('deployments')
+    .select('*')
+    .eq('id', deploymentId)
+    .single();
+
+  if (error) throw error;
+
+  if (deployment && deployment.logs) {
+    deployment.logs = JSON.parse(deployment.logs);
   }
-  
+
   return deployment;
 }
 
 // List deployments for an app
-export function listDeployments(
-  db: Database.Database,
+export async function listDeployments(
+  supabase: SupabaseClient,
   appId: string,
   limit: number = 20
-): any[] {
-  const deployments = db.prepare(`
-    SELECT * FROM deployments 
-    WHERE app_id = ?
-    ORDER BY created_at DESC
-    LIMIT ?
-  `).all(appId, limit);
-  
-  return deployments.map((d: any) => ({
+): Promise<any[]> {
+  const { data: deployments, error } = await supabase
+    .from('deployments')
+    .select('*')
+    .eq('app_id', appId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+
+  return (deployments || []).map((d: any) => ({
     ...d,
     logs: d.logs ? JSON.parse(d.logs) : []
   }));
@@ -159,19 +164,19 @@ export function listDeployments(
 
 // Rollback to a previous deployment
 export async function rollbackDeployment(
-  db: Database.Database,
+  supabase: SupabaseClient,
   appId: string,
   targetDeploymentId: string,
   userId: string
 ): Promise<DeploymentResult> {
-  const targetDeployment = getDeployment(db, targetDeploymentId);
-  
+  const targetDeployment = await getDeployment(supabase, targetDeploymentId);
+
   if (!targetDeployment) {
     throw new Error('Target deployment not found');
   }
-  
+
   // Create a new deployment with the same version
-  return createDeployment(db, {
+  return createDeployment(supabase, {
     appId,
     version: targetDeployment.version,
     environment: targetDeployment.environment
@@ -179,69 +184,81 @@ export async function rollbackDeployment(
 }
 
 // Create app version
-export function createVersion(
-  db: Database.Database,
+export async function createVersion(
+  supabase: SupabaseClient,
   appId: string,
   version: string,
   codeFiles: any,
   userId: string,
   message?: string
-): string {
+): Promise<string> {
   const versionId = `ver-${crypto.randomBytes(8).toString('hex')}`;
-  
-  db.prepare(`
-    INSERT INTO app_versions (
-      id, app_id, version, code_files, created_by, commit_message, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-  `).run(
-    versionId,
-    appId,
-    version,
-    JSON.stringify(codeFiles),
-    userId,
-    message || `Version ${version}`
-  );
-  
+
+  const { error } = await supabase
+    .from('app_versions')
+    .insert({
+      id: versionId,
+      app_id: appId,
+      version,
+      code_files: JSON.stringify(codeFiles),
+      created_by: userId,
+      commit_message: message || `Version ${version}`,
+      created_at: new Date().toISOString()
+    });
+
+  if (error) throw error;
+
   return versionId;
 }
 
 // Get version history
-export function getVersionHistory(
-  db: Database.Database,
+export async function getVersionHistory(
+  supabase: SupabaseClient,
   appId: string,
   limit: number = 50
-): any[] {
-  const versions = db.prepare(`
-    SELECT v.*, u.name as author_name
-    FROM app_versions v
-    LEFT JOIN users u ON v.created_by = u.id
-    WHERE v.app_id = ?
-    ORDER BY v.created_at DESC
-    LIMIT ?
-  `).all(appId, limit);
-  
-  return versions.map((v: any) => ({
+): Promise<any[]> {
+  const { data: versions, error } = await supabase
+    .from('app_versions')
+    .select(`*, users(created_by, name: name)`)
+    .eq('app_id', appId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+
+  return (versions || []).map((v: any) => ({
     ...v,
+    author_name: v.users?.name || null,
     code_files: v.code_files ? JSON.parse(v.code_files) : {}
   }));
 }
 
 // Compare versions
-export function compareVersions(
-  db: Database.Database,
+export async function compareVersions(
+  supabase: SupabaseClient,
   versionId1: string,
   versionId2: string
-): any {
-  const v1 = db.prepare('SELECT * FROM app_versions WHERE id = ?').get(versionId1) as any;
-  const v2 = db.prepare('SELECT * FROM app_versions WHERE id = ?').get(versionId2) as any;
-  
+): Promise<any> {
+  const { data: v1, error: e1 } = await supabase
+    .from('app_versions')
+    .select('*')
+    .eq('id', versionId1)
+    .single();
+  const { data: v2, error: e2 } = await supabase
+    .from('app_versions')
+    .select('*')
+    .eq('id', versionId2)
+    .single();
+
+  if (e1 || e2) throw e1 || e2;
+
   if (!v1 || !v2) {
     throw new Error('Version not found');
   }
-  
+
   const files1 = JSON.parse(v1.code_files);
   const files2 = JSON.parse(v2.code_files);
-  
+
   return {
     version1: {
       id: v1.id,
@@ -263,41 +280,7 @@ export function compareVersions(
   };
 }
 
-// Initialize deployment tables
-export function initDeploymentTables(db: Database.Database) {
-  // Deployments table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS deployments (
-      id TEXT PRIMARY KEY,
-      app_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      version TEXT NOT NULL,
-      environment TEXT NOT NULL,
-      status TEXT NOT NULL,
-      deployed_url TEXT,
-      logs TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (app_id) REFERENCES sdk_apps(id),
-      FOREIGN KEY (user_id) REFERENCES users(id)
-    )
-  `);
-  
-  // App versions table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS app_versions (
-      id TEXT PRIMARY KEY,
-      app_id TEXT NOT NULL,
-      version TEXT NOT NULL,
-      code_files TEXT NOT NULL,
-      created_by TEXT NOT NULL,
-      commit_message TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (app_id) REFERENCES sdk_apps(id),
-      FOREIGN KEY (created_by) REFERENCES users(id)
-    )
-  `);
-  
-  console.log('✅ Deployment tables initialized');
+// Initialize deployment tables (no-op for Supabase; managed via migrations)
+export function initDeploymentTables(_supabase: SupabaseClient) {
+  console.log('✅ Deployment tables managed by Supabase migrations');
 }
-

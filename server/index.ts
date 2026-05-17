@@ -20,7 +20,7 @@ import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
 import { supabase, verifyConnection } from './supabase';
-import { db, initDatabase } from './database';
+// import { db, initDatabase } from './database';
 import * as auth from './auth';
 import * as mcp from './services/mcp';
 import * as deploymentService from './services/deployment';
@@ -242,9 +242,9 @@ const startServer = async () => {
             throw new Error('Failed to connect to Supabase');
         }
 
-        // Initialize local SQLite for modules/marketplace/SDK local features
-        console.log('🗄️ Initializing local SQLite (for marketplace/SDK)...');
-        initDatabase();
+        // Local SQLite no longer used — all data migrated to Supabase
+        // console.log('🗄️ Initializing local SQLite (for marketplace/SDK)...');
+        // initDatabase();
         console.log('✅ Supabase connection verified');
 
         // Initialize subscription service

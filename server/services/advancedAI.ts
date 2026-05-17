@@ -4,7 +4,7 @@
  */
 
 import OpenAI from 'openai';
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 
 interface ProjectData {
   id: string;
@@ -17,6 +17,7 @@ interface ProjectData {
   teamSize: number;
   tasksCompleted: number;
   tasksTotal: number;
+  company_id: string;
 }
 
 interface PredictionResult {
@@ -53,10 +54,10 @@ interface RiskAssessment {
 
 export class AdvancedAIService {
   private openai: OpenAI;
-  private db: Database.Database;
+  private supabase: SupabaseClient;
 
-  constructor(db: Database.Database) {
-    this.db = db;
+  constructor(supabase: SupabaseClient) {
+    this.supabase = supabase;
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY || 'your-api-key',
     });
@@ -67,17 +68,10 @@ export class AdvancedAIService {
    */
   async predictProjectTimeline(projectId: string): Promise<PredictionResult> {
     try {
-      // Gather project data
-      const project = this.getProjectData(projectId);
-      const historicalData = this.getHistoricalProjects(project.company_id);
-
-      // Prepare training data for the model
+      const project = await this.getProjectData(projectId);
+      const historicalData = await this.getHistoricalProjects(project.company_id);
       const trainingData = this.prepareTimelineTrainingData(historicalData);
-
-      // Use AI to analyze patterns and predict
       const prediction = await this.analyzeTimelinePatterns(project, trainingData);
-
-      // Calculate confidence based on data quality and similarity
       const confidence = this.calculatePredictionConfidence(project, historicalData);
 
       return {
@@ -85,7 +79,7 @@ export class AdvancedAIService {
         confidence,
         riskFactors: prediction.riskFactors,
         recommendations: prediction.recommendations,
-        accuracy: confidence * 0.95, // Expected accuracy based on model performance
+        accuracy: confidence * 0.95,
       };
     } catch (error) {
       console.error('Timeline prediction error:', error);
@@ -98,10 +92,8 @@ export class AdvancedAIService {
    */
   async predictProjectCosts(projectId: string): Promise<CostPrediction> {
     try {
-      const project = this.getProjectData(projectId);
-      const historicalCosts = this.getHistoricalCostData(project.company_id);
-
-      // Analyze cost patterns and predict final costs
+      const project = await this.getProjectData(projectId);
+      const historicalCosts = await this.getHistoricalCostData(project.company_id);
       const costAnalysis = await this.analyzeCostPatterns(project, historicalCosts);
 
       return {
@@ -121,10 +113,8 @@ export class AdvancedAIService {
    */
   async assessProjectRisks(projectId: string): Promise<RiskAssessment> {
     try {
-      const project = this.getProjectData(projectId);
+      const project = await this.getProjectData(projectId);
       const riskFactors = await this.identifyRiskFactors(project);
-
-      // Calculate overall risk score
       const riskScore = this.calculateRiskScore(riskFactors);
 
       return {
@@ -143,10 +133,8 @@ export class AdvancedAIService {
    */
   async optimizeResourceAllocation(projectId: string): Promise<any> {
     try {
-      const project = this.getProjectData(projectId);
-      const availableResources = this.getAvailableResources(project.company_id);
-
-      // Use optimization algorithms to suggest resource allocation
+      const project = await this.getProjectData(projectId);
+      const availableResources = await this.getAvailableResources(project.company_id);
       const optimization = await this.optimizeResourceUsage(project, availableResources);
 
       return {
@@ -166,13 +154,8 @@ export class AdvancedAIService {
    */
   async analyzeDocument(documentData: any): Promise<any> {
     try {
-      // Use AI vision and OCR to extract data from documents
       const extractedData = await this.extractDocumentData(documentData);
-
-      // Classify document type and purpose
       const documentType = await this.classifyDocument(extractedData);
-
-      // Extract relevant information based on document type
       const structuredData = await this.structureExtractedData(extractedData, documentType);
 
       return {
@@ -189,23 +172,25 @@ export class AdvancedAIService {
 
   // Private helper methods
 
-  private getProjectData(projectId: string): ProjectData {
-    const project = this.db.prepare(`
-      SELECT
-        p.*,
-        COUNT(pt.id) as team_size,
-        COUNT(CASE WHEN t.status = 'completed' THEN 1 END) as tasks_completed,
-        COUNT(t.id) as tasks_total
-      FROM projects p
-      LEFT JOIN project_team pt ON p.id = pt.project_id AND pt.left_at IS NULL
-      LEFT JOIN tasks t ON p.id = t.project_id
-      WHERE p.id = ?
-      GROUP BY p.id
-    `).get(projectId);
+  private async getProjectData(projectId: string): Promise<ProjectData> {
+    const { data: project, error } = await this.supabase
+      .from('projects')
+      .select(`
+        *,
+        project_team(count),
+        tasks(status)
+      `)
+      .eq('id', projectId)
+      .single();
 
-    if (!project) {
+    if (error || !project) {
       throw new Error('Project not found');
     }
+
+    const tasks = project.tasks || [];
+    const tasksCompleted = tasks.filter((t: any) => t.status === 'completed').length;
+    const tasksTotal = tasks.length;
+    const teamSize = project.project_team?.[0]?.count || 0;
 
     return {
       id: project.id.toString(),
@@ -214,62 +199,92 @@ export class AdvancedAIService {
       endDate: project.end_date,
       budget: project.budget || 0,
       status: project.status,
-      progress: this.calculateProjectProgress(project),
-      teamSize: project.team_size || 0,
-      tasksCompleted: project.tasks_completed || 0,
-      tasksTotal: project.tasks_total || 0,
+      progress: this.calculateProjectProgress({ tasks_completed: tasksCompleted, tasks_total: tasksTotal }),
+      teamSize,
+      tasksCompleted,
+      tasksTotal,
+      company_id: project.company_id || '',
     };
   }
 
-  private getHistoricalProjects(companyId: string) {
-    return this.db.prepare(`
-      SELECT
-        p.*,
-        COUNT(pt.id) as team_size,
-        COUNT(CASE WHEN t.status = 'completed' THEN 1 END) as tasks_completed,
-        COUNT(t.id) as tasks_total,
-        julianday(p.actual_end_date) - julianday(p.end_date) as timeline_variance,
-        (p.actual_cost - p.budget) / p.budget as cost_variance
-      FROM projects p
-      LEFT JOIN project_team pt ON p.id = pt.project_id
-      LEFT JOIN tasks t ON p.id = t.project_id
-      WHERE p.company_id = ? AND p.status = 'completed'
-      GROUP BY p.id
-      ORDER BY p.end_date DESC
-      LIMIT 100
-    `).all(companyId);
+  private async getHistoricalProjects(companyId: string) {
+    const { data, error } = await this.supabase
+      .from('projects')
+      .select(`
+        *,
+        project_team(count),
+        tasks(status)
+      `)
+      .eq('company_id', companyId)
+      .eq('status', 'completed')
+      .order('end_date', { ascending: false })
+      .limit(100);
+
+    if (error || !data) return [];
+
+    return data.map((p: any) => {
+      const tasks = p.tasks || [];
+      const tasksCompleted = tasks.filter((t: any) => t.status === 'completed').length;
+      const tasksTotal = tasks.length;
+      const teamSize = p.project_team?.[0]?.count || 0;
+
+      return {
+        ...p,
+        tasks_completed: tasksCompleted,
+        tasks_total: tasksTotal,
+        team_size: teamSize,
+        timeline_variance: p.actual_end_date && p.end_date
+          ? (new Date(p.actual_end_date).getTime() - new Date(p.end_date).getTime()) / (1000 * 60 * 60 * 24)
+          : 0,
+        cost_variance: p.actual_cost && p.budget
+          ? (p.actual_cost - p.budget) / p.budget
+          : 0,
+      };
+    });
   }
 
-  private getHistoricalCostData(companyId: string) {
-    return this.db.prepare(`
-      SELECT
-        p.id,
-        p.budget,
-        p.actual_cost,
-        (p.actual_cost - p.budget) / p.budget as variance,
-        p.category,
-        p.duration_days
-      FROM projects p
-      WHERE p.company_id = ? AND p.status = 'completed' AND p.actual_cost IS NOT NULL
-      ORDER BY p.end_date DESC
-      LIMIT 50
-    `).all(companyId);
+  private async getHistoricalCostData(companyId: string) {
+    const { data, error } = await this.supabase
+      .from('projects')
+      .select('*')
+      .eq('company_id', companyId)
+      .eq('status', 'completed')
+      .not('actual_cost', 'is', null)
+      .order('end_date', { ascending: false })
+      .limit(50);
+
+    if (error || !data) return [];
+
+    return data.map((p: any) => ({
+      id: p.id,
+      budget: p.budget,
+      actual_cost: p.actual_cost,
+      variance: p.actual_cost && p.budget ? (p.actual_cost - p.budget) / p.budget : 0,
+      category: p.category,
+      duration_days: p.duration_days,
+    }));
   }
 
-  private getAvailableResources(companyId: string) {
-    return this.db.prepare(`
-      SELECT
-        u.id,
-        u.name,
-        u.role,
-        u.skills,
-        COUNT(pt.id) as current_projects,
-        u.hourly_rate
-      FROM users u
-      LEFT JOIN project_team pt ON u.id = pt.user_id AND pt.left_at IS NULL
-      WHERE u.company_id = ? AND u.is_active = 1
-      GROUP BY u.id
-    `).all(companyId);
+  private async getAvailableResources(companyId: string) {
+    const { data, error } = await this.supabase
+      .from('users')
+      .select(`
+        *,
+        project_team(count)
+      `)
+      .eq('company_id', companyId)
+      .eq('is_active', 1);
+
+    if (error || !data) return [];
+
+    return data.map((u: any) => ({
+      id: u.id,
+      name: u.name,
+      role: u.role,
+      skills: u.skills,
+      current_projects: u.project_team?.[0]?.count || 0,
+      hourly_rate: u.hourly_rate,
+    }));
   }
 
   private calculateProjectProgress(project: any): number {
@@ -278,7 +293,6 @@ export class AdvancedAIService {
   }
 
   private async analyzeTimelinePatterns(project: ProjectData, historicalData: any[]): Promise<any> {
-    // Use AI to analyze patterns in historical data
     const prompt = `
       Analyze these historical project completion patterns and predict the end date for a new project:
 
@@ -431,17 +445,14 @@ export class AdvancedAIService {
   }
 
   private calculatePredictionConfidence(project: ProjectData, historicalData: any[]): number {
-    // Calculate confidence based on data similarity and quantity
     const similarity = this.calculateDataSimilarity(project, historicalData);
-    const dataQuantity = Math.min(historicalData.length / 10, 1); // Normalize to 10+ projects
-
+    const dataQuantity = Math.min(historicalData.length / 10, 1);
     return (similarity * 0.7) + (dataQuantity * 0.3);
   }
 
   private calculateDataSimilarity(project: ProjectData, historicalData: any[]): number {
     if (historicalData.length === 0) return 0;
 
-    // Simple similarity based on project characteristics
     const avgHistoricalBudget = historicalData.reduce((sum, p) => sum + (p.budget || 0), 0) / historicalData.length;
     const budgetSimilarity = 1 - Math.abs(project.budget - avgHistoricalBudget) / Math.max(project.budget, avgHistoricalBudget);
 
@@ -459,7 +470,6 @@ export class AdvancedAIService {
   }
 
   private calculateComplexityScore(project: any): number {
-    // Calculate project complexity based on various factors
     let complexity = 0;
 
     if (project.budget > 1000000) complexity += 0.3;
@@ -509,8 +519,6 @@ export class AdvancedAIService {
   }
 
   private async extractDocumentData(documentData: any): Promise<any> {
-    // This would integrate with OCR and vision APIs
-    // For now, return mock implementation
     return {
       text: 'Extracted document text',
       confidence: 0.95,
@@ -519,7 +527,6 @@ export class AdvancedAIService {
   }
 
   private async classifyDocument(extractedData: any): Promise<string> {
-    // AI-powered document classification
     const prompt = `Classify this document type: ${extractedData.text.substring(0, 500)}`;
 
     const completion = await this.openai.chat.completions.create({
@@ -542,7 +549,6 @@ export class AdvancedAIService {
   }
 
   private async structureExtractedData(extractedData: any, documentType: string): Promise<any> {
-    // Structure data based on document type
     const prompt = `
       Extract structured data from this ${documentType} document:
       ${extractedData.text.substring(0, 1000)}

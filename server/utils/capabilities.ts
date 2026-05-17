@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 
 type RoleKey = 'super_admin' | 'developer' | 'company_admin' | string;
 
@@ -110,35 +110,47 @@ export const getCapabilitiesForRole = (role: RoleKey): CapabilityConfig => {
   };
 };
 
-export const getSandboxUsageCounts = (db: Database.Database, userId: string): SandboxUsageCounts => {
+export const getSandboxUsageCounts = async (
+  supabase: SupabaseClient,
+  userId: string
+): Promise<SandboxUsageCounts> => {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const todayIso = today.toISOString();
 
-  const runsTodayRow = db
-    .prepare('SELECT COUNT(*) as count FROM sandbox_runs WHERE user_id = ? AND created_at >= ?')
-    .get(userId, todayIso) as any;
+  const { data: runsTodayRow, error: runsError } = await supabase
+    .from('sandbox_runs')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .gte('created_at', todayIso)
+    .single();
 
-  const activeAppsRow = db
-    .prepare('SELECT COUNT(*) as count FROM sdk_apps WHERE developer_id = ? AND status IN (\'draft\', \'pending_review\', \'approved\')')
-    .get(userId) as any;
+  const { data: activeAppsRow, error: appsError } = await supabase
+    .from('sdk_apps')
+    .select('*', { count: 'exact', head: true })
+    .eq('developer_id', userId)
+    .in('status', ['draft', 'pending_review', 'approved'])
+    .single();
 
-  const activeWorkflowsRow = db
-    .prepare('SELECT COUNT(*) as count FROM sdk_workflows WHERE developer_id = ? AND is_active = 1')
-    .get(userId) as any;
+  const { data: activeWorkflowsRow, error: workflowsError } = await supabase
+    .from('sdk_workflows')
+    .select('*', { count: 'exact', head: true })
+    .eq('developer_id', userId)
+    .eq('is_active', 1)
+    .single();
 
   return {
-    sandboxRunsToday: runsTodayRow?.count ?? 0,
-    activeApps: activeAppsRow?.count ?? 0,
-    activeWorkflows: activeWorkflowsRow?.count ?? 0
+    sandboxRunsToday: (runsTodayRow as any)?.count ?? 0,
+    activeApps: (activeAppsRow as any)?.count ?? 0,
+    activeWorkflows: (activeWorkflowsRow as any)?.count ?? 0
   };
 };
 
-export const enforceSandboxRunQuota = (
-  db: Database.Database,
+export const enforceSandboxRunQuota = async (
+  supabase: SupabaseClient,
   user: any,
   capabilities: CapabilityConfig
-) => {
+): Promise<void> => {
   if (!capabilities.canAccessSandbox) {
     const error: any = new Error('Sandbox access is not enabled for this role');
     error.status = 403;
@@ -149,7 +161,7 @@ export const enforceSandboxRunQuota = (
     return;
   }
 
-  const usage = getSandboxUsageCounts(db, user.id);
+  const usage = await getSandboxUsageCounts(supabase, user.id);
   if (usage.sandboxRunsToday >= capabilities.maxSandboxRunsPerDay) {
     const error: any = new Error('Daily sandbox run limit reached');
     error.status = 429;

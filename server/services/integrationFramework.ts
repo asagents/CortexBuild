@@ -3,14 +3,14 @@
  * Pluggable architecture for external service integrations
  */
 
-import Database from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 
 export interface IntegrationConfig {
   id: string;
   name: string;
   type: 'oauth' | 'api_key' | 'webhook' | 'custom';
   baseUrl: string;
-  authType: 'bearer' | 'basic' | 'oauth2' | 'api_key';
+  authType: 'bearer' | 'basic' | 'oauth2' | 'api_key' | 'custom';
   credentials: {
     clientId?: string;
     clientSecret?: string;
@@ -19,6 +19,7 @@ export interface IntegrationConfig {
     password?: string;
     accessToken?: string;
     refreshToken?: string;
+    webhookUrl?: string;
   };
   rateLimits?: {
     requests: number;
@@ -50,63 +51,18 @@ export interface IntegrationData {
 }
 
 export class IntegrationFramework {
-  private db: Database.Database;
+  private supabase: SupabaseClient;
   private activeIntegrations: Map<string, any> = new Map();
 
-  constructor(db: Database.Database) {
-    this.db = db;
+  constructor(supabase: SupabaseClient) {
+    this.supabase = supabase;
     this.initializeTables();
   }
 
-  private initializeTables(): void {
-    // Integration configurations table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS integrations (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        type TEXT NOT NULL,
-        base_url TEXT NOT NULL,
-        auth_type TEXT NOT NULL,
-        credentials TEXT,
-        rate_limits TEXT,
-        enabled INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Webhook configurations table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS integration_webhooks (
-        id TEXT PRIMARY KEY,
-        integration_id TEXT NOT NULL,
-        event TEXT NOT NULL,
-        url TEXT NOT NULL,
-        secret TEXT NOT NULL,
-        enabled INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (integration_id) REFERENCES integrations(id) ON DELETE CASCADE
-      )
-    `);
-
-    // Synced data tracking table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS integration_data (
-        id TEXT PRIMARY KEY,
-        integration_id TEXT NOT NULL,
-        company_id TEXT NOT NULL,
-        external_id TEXT NOT NULL,
-        data TEXT NOT NULL,
-        synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        status TEXT DEFAULT 'pending',
-        FOREIGN KEY (integration_id) REFERENCES integrations(id) ON DELETE CASCADE
-      )
-    `);
-
-    // Create indexes for performance
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_integrations_enabled ON integrations(enabled)');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_integration_data_company ON integration_data(company_id)');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_integration_data_status ON integration_data(status)');
+  private async initializeTables(): Promise<void> {
+    // Tables are assumed to exist in Supabase; skip CREATE TABLE statements
+    // They should be created via Supabase migrations instead
+    console.log('IntegrationFramework initialized with Supabase');
   }
 
   /**
@@ -115,19 +71,23 @@ export class IntegrationFramework {
   async registerIntegration(config: Omit<IntegrationConfig, 'id' | 'createdAt' | 'updatedAt'>): Promise<string> {
     const integrationId = `integration_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    this.db.prepare(`
-      INSERT INTO integrations (id, name, type, base_url, auth_type, credentials, rate_limits, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      integrationId,
-      config.name,
-      config.type,
-      config.baseUrl,
-      config.authType,
-      JSON.stringify(config.credentials),
-      JSON.stringify(config.rateLimits || { requests: 100, windowMs: 60000 }),
-      config.enabled ? 1 : 0
-    );
+    const { error } = await this.supabase
+      .from('integrations')
+      .insert({
+        id: integrationId,
+        name: config.name,
+        type: config.type,
+        base_url: config.baseUrl,
+        auth_type: config.authType,
+        credentials: JSON.stringify(config.credentials),
+        rate_limits: JSON.stringify(config.rateLimits || { requests: 100, windowMs: 60000 }),
+        enabled: config.enabled ? 1 : 0,
+      });
+
+    if (error) {
+      console.error('registerIntegration error:', error.message);
+      throw error;
+    }
 
     return integrationId;
   }
@@ -136,9 +96,13 @@ export class IntegrationFramework {
    * Get integration configuration
    */
   async getIntegration(integrationId: string): Promise<IntegrationConfig | null> {
-    const row = this.db.prepare('SELECT * FROM integrations WHERE id = ?').get(integrationId) as any;
+    const { data: row, error } = await this.supabase
+      .from('integrations')
+      .select('*')
+      .eq('id', integrationId)
+      .single();
 
-    if (!row) return null;
+    if (error || !row) return null;
 
     return {
       id: row.id,
@@ -158,27 +122,29 @@ export class IntegrationFramework {
    * Update integration configuration
    */
   async updateIntegration(integrationId: string, updates: Partial<IntegrationConfig>): Promise<void> {
-    const updateFields: string[] = [];
-    const values: any[] = [];
+    const mappedUpdates: Record<string, any> = {};
 
     Object.entries(updates).forEach(([key, value]) => {
       if (value !== undefined) {
         const dbKey = key === 'baseUrl' ? 'base_url' :
                      key === 'authType' ? 'auth_type' :
                      key === 'rateLimits' ? 'rate_limits' : key;
-        updateFields.push(`${dbKey} = ?`);
-        values.push(key === 'credentials' || key === 'rateLimits' ? JSON.stringify(value) : value);
+        mappedUpdates[dbKey] = key === 'credentials' || key === 'rateLimits' ? JSON.stringify(value) : value;
       }
     });
 
-    if (updateFields.length > 0) {
-      values.push(new Date().toISOString());
-      updateFields.push('updated_at = ?');
-      values.push(integrationId);
+    if (Object.keys(mappedUpdates).length > 0) {
+      mappedUpdates['updated_at'] = new Date().toISOString();
 
-      this.db.prepare(`
-        UPDATE integrations SET ${updateFields.join(', ')} WHERE id = ?
-      `).run(...values);
+      const { error } = await this.supabase
+        .from('integrations')
+        .update(mappedUpdates)
+        .eq('id', integrationId);
+
+      if (error) {
+        console.error('updateIntegration error:', error.message);
+        throw error;
+      }
     }
   }
 
@@ -186,13 +152,18 @@ export class IntegrationFramework {
    * List integrations for a company
    */
   async getCompanyIntegrations(companyId: string): Promise<IntegrationConfig[]> {
-    const rows = this.db.prepare(`
-      SELECT i.* FROM integrations i
-      WHERE i.enabled = 1
-      ORDER BY i.created_at DESC
-    `).all() as any[];
+    const { data: rows, error } = await this.supabase
+      .from('integrations')
+      .select('*')
+      .eq('enabled', 1)
+      .order('created_at', { ascending: false });
 
-    return rows.map(row => ({
+    if (error) {
+      console.error('getCompanyIntegrations error:', error.message);
+      return [];
+    }
+
+    return (rows || []).map((row: any) => ({
       id: row.id,
       name: row.name,
       type: row.type,
@@ -213,10 +184,21 @@ export class IntegrationFramework {
     const webhookId = `webhook_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const secret = this.generateWebhookSecret();
 
-    this.db.prepare(`
-      INSERT INTO integration_webhooks (id, integration_id, event, url, secret, enabled)
-      VALUES (?, ?, ?, ?, ?, 1)
-    `).run(webhookId, integrationId, event, url, secret);
+    const { error } = await this.supabase
+      .from('integration_webhooks')
+      .insert({
+        id: webhookId,
+        integration_id: integrationId,
+        event,
+        url,
+        secret,
+        enabled: 1,
+      });
+
+    if (error) {
+      console.error('registerWebhook error:', error.message);
+      throw error;
+    }
 
     return webhookId;
   }
@@ -225,12 +207,19 @@ export class IntegrationFramework {
    * Trigger webhook for integration event
    */
   async triggerWebhook(integrationId: string, event: string, data: any): Promise<void> {
-    const webhooks = this.db.prepare(`
-      SELECT * FROM integration_webhooks
-      WHERE integration_id = ? AND event = ? AND enabled = 1
-    `).all(integrationId, event) as any[];
+    const { data: webhooks, error } = await this.supabase
+      .from('integration_webhooks')
+      .select('*')
+      .eq('integration_id', integrationId)
+      .eq('event', event)
+      .eq('enabled', 1);
 
-    for (const webhook of webhooks) {
+    if (error) {
+      console.error('triggerWebhook error:', error.message);
+      return;
+    }
+
+    for (const webhook of (webhooks || [])) {
       try {
         await this.sendWebhook(webhook, data);
       } catch (error) {
@@ -245,35 +234,62 @@ export class IntegrationFramework {
   async syncIntegrationData(integrationId: string, companyId: string, data: any): Promise<void> {
     const syncId = `sync_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    this.db.prepare(`
-      INSERT INTO integration_data (id, integration_id, company_id, external_id, data, status)
-      VALUES (?, ?, ?, ?, ?, 'synced')
-    `).run(syncId, integrationId, companyId, data.externalId || syncId, JSON.stringify(data));
+    const { error } = await this.supabase
+      .from('integration_data')
+      .insert({
+        id: syncId,
+        integration_id: integrationId,
+        company_id: companyId,
+        external_id: data.externalId || syncId,
+        data: JSON.stringify(data),
+        status: 'synced',
+      });
+
+    if (error) {
+      console.error('syncIntegrationData error:', error.message);
+      throw error;
+    }
   }
 
   /**
    * Get sync status for integration
    */
   async getSyncStatus(integrationId: string, companyId: string): Promise<any> {
-    const stats = this.db.prepare(`
-      SELECT
-        status,
-        COUNT(*) as count,
-        MAX(synced_at) as last_sync
-      FROM integration_data
-      WHERE integration_id = ? AND company_id = ?
-      GROUP BY status
-    `).all(integrationId, companyId) as any[];
+    const { data: rows, error } = await this.supabase
+      .from('integration_data')
+      .select('status, synced_at')
+      .eq('integration_id', integrationId)
+      .eq('company_id', companyId);
+
+    if (error) {
+      console.error('getSyncStatus error:', error.message);
+      return {
+        integrationId,
+        companyId,
+        stats: {},
+        lastSync: null,
+        totalRecords: 0,
+      };
+    }
+
+    const stats: Record<string, number> = {};
+    let lastSync: string | null = null;
+
+    (rows || []).forEach((row: any) => {
+      stats[row.status] = (stats[row.status] || 0) + 1;
+      if (row.synced_at) {
+        if (!lastSync || row.synced_at > lastSync) {
+          lastSync = row.synced_at;
+        }
+      }
+    });
 
     return {
       integrationId,
       companyId,
-      stats: stats.reduce((acc, stat) => {
-        acc[stat.status] = stat.count;
-        return acc;
-      }, {}),
-      lastSync: stats[0]?.last_sync || null,
-      totalRecords: stats.reduce((sum, stat) => sum + stat.count, 0),
+      stats,
+      lastSync,
+      totalRecords: (rows || []).length,
     };
   }
 
@@ -288,7 +304,6 @@ export class IntegrationFramework {
         return { success: false, message: 'Integration not found' };
       }
 
-      // Test basic connectivity based on integration type
       const responseTime = Date.now() - startTime;
       return {
         success: true,
@@ -335,7 +350,6 @@ export class IntegrationFramework {
   }
 
   private generateSignature(payload: any, secret: string): string {
-    // Simple HMAC signature for webhook verification
     const crypto = require('crypto');
     const hmac = crypto.createHmac('sha256', secret);
     hmac.update(JSON.stringify(payload));
@@ -346,7 +360,6 @@ export class IntegrationFramework {
    * Pre-built integration connectors
    */
 
-  // Procore Integration
   async setupProcoreIntegration(companyId: string, credentials: any): Promise<string> {
     return this.registerIntegration({
       name: 'Procore',
@@ -358,7 +371,6 @@ export class IntegrationFramework {
     });
   }
 
-  // QuickBooks Integration
   async setupQuickBooksIntegration(companyId: string, credentials: any): Promise<string> {
     return this.registerIntegration({
       name: 'QuickBooks',
@@ -370,7 +382,6 @@ export class IntegrationFramework {
     });
   }
 
-  // Slack Integration
   async setupSlackIntegration(companyId: string, webhookUrl: string): Promise<string> {
     const integrationId = await this.registerIntegration({
       name: 'Slack',
@@ -381,7 +392,6 @@ export class IntegrationFramework {
       enabled: true,
     });
 
-    // Register default webhooks for Slack
     await this.registerWebhook(integrationId, 'project.created', webhookUrl);
     await this.registerWebhook(integrationId, 'project.updated', webhookUrl);
     await this.registerWebhook(integrationId, 'task.completed', webhookUrl);
@@ -389,7 +399,6 @@ export class IntegrationFramework {
     return integrationId;
   }
 
-  // Generic REST API Integration
   async setupGenericAPIIntegration(name: string, baseUrl: string, apiKey: string): Promise<string> {
     return this.registerIntegration({
       name,

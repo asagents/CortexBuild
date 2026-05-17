@@ -5,24 +5,15 @@
  */
 
 import { Router } from 'express';
-import type { Database } from 'better-sqlite3';
+import { SupabaseClient } from '@supabase/supabase-js';
 import CodexMCPBridge from '../services/codex-mcp-bridge.js';
 import { getSessionStats } from '../services/mcp.js';
 
-// Extend Express Request type to include user
-declare global {
-  namespace Express {
-    interface Request {
-      user?: { id: string; email: string; role: string };
-    }
-  }
-}
-
-export function createCodexMCPRoutes(db: Database.Database): Router {
+export function createCodexMCPRoutes(supabase: SupabaseClient): Router {
   const router = Router();
   
   // Initialize Codex MCP Bridge
-  const codexBridge = new CodexMCPBridge(db, {
+  const codexBridge = new CodexMCPBridge(supabase, {
     command: 'python3',
     args: ['scripts/codex-mcp-server.py'],
     timeout: 300000, // 5 minutes
@@ -253,7 +244,7 @@ export function createCodexMCPRoutes(db: Database.Database): Router {
       }
 
       const { sessionId } = req.params;
-      const stats = getSessionStats(db, userId);
+      const stats = await getSessionStats(supabase, userId);
 
       res.json({
         success: true,

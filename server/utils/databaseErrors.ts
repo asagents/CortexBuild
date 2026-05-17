@@ -1,9 +1,8 @@
-import Database from 'better-sqlite3';
 import { logger } from './logger';
 
 /**
  * Database Error Types
- * Maps SQLite error codes to user-friendly messages
+ * Maps database error codes to user-friendly messages
  */
 export enum DatabaseErrorCode {
   CONSTRAINT_VIOLATION = 'SQLITE_CONSTRAINT',
@@ -53,7 +52,7 @@ export class DatabaseError extends Error {
 }
 
 /**
- * Parse SQLite Error and Return User-Friendly Message
+ * Parse database Error and Return User-Friendly Message
  */
 export const parseDatabaseError = (err: any): DatabaseError => {
   const code = err.code || 'UNKNOWN';
@@ -244,146 +243,16 @@ export const safeQuery = async <T>(
 };
 
 /**
- * Transaction Wrapper with Automatic Rollback
- * Ensures transactions are properly rolled back on error
- */
-export const safeTransaction = <T>(
-  db: Database.Database,
-  operation: () => T
-): T => {
-  const transaction = db.transaction(operation);
-
-  try {
-    return transaction();
-  } catch (err: any) {
-    logger.error('Transaction failed and rolled back', {
-      code: err.code,
-      message: err.message,
-    });
-    throw parseDatabaseError(err);
-  }
-};
-
-/**
- * Database Health Check
- * Verifies database is accessible and functional
- */
-export const checkDatabaseHealth = (db: Database.Database): boolean => {
-  try {
-    // Simple query to verify database is working
-    const result = db.prepare('SELECT 1 as health').get();
-    return result && (result as any).health === 1;
-  } catch (err: any) {
-    logger.error('Database health check failed', {
-      code: err.code,
-      message: err.message,
-    });
-    return false;
-  }
-};
-
-/**
- * Database Backup Helper
- * Creates a backup of the database file
- */
-export const createBackup = async (
-  db: Database.Database,
-  backupPath: string
-): Promise<void> => {
-  try {
-    await db.backup(backupPath);
-    logger.info(`Database backup created: ${backupPath}`);
-  } catch (err: any) {
-    logger.error('Database backup failed', {
-      code: err.code,
-      message: err.message,
-      path: backupPath,
-    });
-    throw parseDatabaseError(err);
-  }
-};
-
-/**
- * Connection Pool Recovery
- * Attempts to recover from connection issues
- */
-export const recoverConnection = (
-  dbPath: string,
-  options: Database.Options = {}
-): Database.Database | null => {
-  try {
-    logger.info('Attempting database connection recovery...');
-    
-    const db = new Database(dbPath, {
-      ...options,
-      timeout: 5000, // 5 second timeout
-    });
-
-    // Verify connection works
-    if (checkDatabaseHealth(db)) {
-      logger.info('✅ Database connection recovered successfully');
-      return db;
-    } else {
-      logger.error('❌ Database health check failed after recovery attempt');
-      return null;
-    }
-  } catch (err: any) {
-    logger.error('Database connection recovery failed', {
-      code: err.code,
-      message: err.message,
-      path: dbPath,
-    });
-    return null;
-  }
-};
-
-/**
- * Graceful Database Shutdown
- * Ensures WAL checkpoint and proper cleanup
- */
-export const shutdownDatabase = (db: Database.Database): void => {
-  try {
-    logger.info('Shutting down database gracefully...');
-
-    // Checkpoint WAL to main database
-    db.pragma('wal_checkpoint(TRUNCATE)');
-    logger.info('✅ WAL checkpoint complete');
-
-    // Close database connection
-    db.close();
-    logger.info('✅ Database connection closed');
-  } catch (err: any) {
-    logger.error('Error during database shutdown', {
-      code: err.code,
-      message: err.message,
-    });
-    // Force close even if checkpoint fails
-    try {
-      db.close();
-    } catch (closeErr) {
-      logger.error('Failed to close database', closeErr);
-    }
-  }
-};
-
-/**
  * Usage Examples:
- * 
+ *
  * 1. Safe query with retry:
- *    const users = await safeQuery(() => 
- *      db.prepare('SELECT * FROM users WHERE company_id = ?').all(companyId)
+ *    const users = await safeQuery(() =>
+ *      supabase.from('users').select().eq('company_id', companyId)
  *    );
- * 
- * 2. Safe transaction:
- *    const result = safeTransaction(db, () => {
- *      db.prepare('INSERT INTO projects ...').run(data);
- *      db.prepare('INSERT INTO tasks ...').run(taskData);
- *      return { success: true };
- *    });
- * 
- * 3. Error handling in routes:
+ *
+ * 2. Error handling in routes:
  *    try {
- *      const project = db.getProject(id);
+ *      const project = await supabase.from('projects').select().eq('id', id).single();
  *    } catch (err) {
  *      const dbError = parseDatabaseError(err);
  *      throw new AppError(dbError.message, 500);

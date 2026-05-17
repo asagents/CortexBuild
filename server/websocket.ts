@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { verifyToken } from './auth';
-import type { Database } from 'better-sqlite3';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 interface Client {
   ws: WebSocket;
@@ -14,7 +14,7 @@ interface Client {
 
 const clients = new Map<WebSocket, Client>();
 
-export function setupWebSocket(server: any, db: Database) {
+export function setupWebSocket(server: any, supabase: SupabaseClient) {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (request: IncomingMessage, socket: any, head: Buffer) => {
@@ -42,11 +42,19 @@ export function setupWebSocket(server: any, db: Database) {
     }
   });
 
-  wss.on('connection', (ws: WebSocket, request: IncomingMessage, user: any) => {
+  wss.on('connection', async (ws: WebSocket, request: IncomingMessage, user: any) => {
     console.log(`✅ WebSocket client connected: ${user.email}`);
 
     // Get user details from database
-    const userDetails = db.prepare('SELECT id, name, email FROM users WHERE id = ?').get(user.userId) as any;
+    const { data: userDetails, error } = await supabase
+      .from('users')
+      .select('id, name, email')
+      .eq('id', user.userId)
+      .single();
+
+    if (error) {
+      console.error('WebSocket: failed to fetch user details:', error.message);
+    }
 
     const client: Client = {
       ws,
@@ -79,7 +87,7 @@ export function setupWebSocket(server: any, db: Database) {
     ws.on('message', (data: Buffer) => {
       try {
         const message = JSON.parse(data.toString());
-        handleMessage(ws, message, client, db);
+        handleMessage(ws, message, client);
       } catch (error) {
         console.error('WebSocket message error:', error);
         ws.send(JSON.stringify({
@@ -122,7 +130,7 @@ export function setupWebSocket(server: any, db: Database) {
     broadcastActiveUsers();
   });
 
-  function handleMessage(ws: WebSocket, message: any, client: Client, db: Database) {
+  function handleMessage(ws: WebSocket, message: any, client: Client) {
     client.lastActivity = new Date();
 
     switch (message.type) {
@@ -235,4 +243,3 @@ export function setupWebSocket(server: any, db: Database) {
   
   return wss;
 }
-
