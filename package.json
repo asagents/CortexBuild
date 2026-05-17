@@ -14,9 +14,6 @@
     "start": "next start -p 3002",
     "preview": "vite preview",
     "deploy": "npm run build && node deploy-ionos.cjs",
-    "vercel:dev": "vercel dev",
-    "vercel:deploy": "vercel",
-    "vercel:prod": "vercel --prod",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "db:backup": "chmod +x scripts/backup-database.sh && ./scripts/backup-database.sh",
     "db:restore": "chmod +x scripts/restore-database.sh && ./scripts/restore-database.sh",
@@ -112,7 +109,6 @@
     "ts-jest": "29.4.5",
     "tsx": "4.20.6",
     "typescript": "5.9.3",
-    "vercel": "48.8.2",
     "vite": "^6.2.0",
     "vite-bundle-visualizer": "1.2.1"
   },
@@ -120,6 +116,9 @@
     "rollup-plugin-visualizer": "5.12.0",
     "vite-bundle-visualizer": {
       "rollup-plugin-visualizer": "5.12.0"
+    },
+    "next": {
+      "postcss": "8.5.10"
     }
   }
 }
