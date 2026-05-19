@@ -71,7 +71,7 @@
     "stripe": "19.1.0",
     "uuid": "^13.0.2",
     "web-vitals": "5.1.0",
-    "ws": "8.18.3"
+    "ws": "^8.20.1"
   },
   "devDependencies": {
     "@babel/core": "7.28.5",
