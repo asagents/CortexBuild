@@ -4,7 +4,7 @@
  */
 
 import { lazy, ComponentType } from 'react';
-import { Screen } from '../types';
+import { Screen } from '../../types';
 
 // ============================================
 // MODULE TYPES

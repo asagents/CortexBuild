@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect, useMemo, ComponentType } from 'react';
-import { Screen } from '../types';
+import { Screen } from '../../types';
 import { ModuleRegistry, ModuleConfig, UserRole } from './ModuleRegistry';
 
 export interface UseModuleOptions {
