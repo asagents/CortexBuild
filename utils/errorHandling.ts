@@ -95,8 +95,8 @@ export class DatabaseError extends AppError {
 }
 
 export class APIError extends AppError {
-    constructor(message: string, statusCode: number = 500, context?: Record<string, any>) {
-        super(message, 'API_ERROR', statusCode, true, context);
+    constructor(message: string, code: string = 'API_ERROR', statusCode: number = 500, context?: Record<string, any>) {
+        super(message, code, statusCode, true, context);
         this.name = 'APIError';
     }
 }
