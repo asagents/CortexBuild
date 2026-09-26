@@ -599,6 +599,7 @@ export const apiClient = {
      * Clear authentication token
      */
     clearAuth(): void {
+        localStorage.removeItem('authToken');
         localStorage.removeItem('token');
         localStorage.removeItem('constructai_token');
     },
