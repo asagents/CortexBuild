@@ -171,6 +171,7 @@ export type Screen =
     | 'landing'
     | 'developer-landing'
     // Tool screens
+    | 'innovation-hub'
     | 'placeholder-tool';
 
 
