@@ -5,6 +5,7 @@ import {
   Timer, TriangleAlert, Zap
 } from 'lucide-react';
 import { Project, Screen, User } from '../../types';
+import apiClient from '../../lib/api/client';
 
 interface ConstructionInnovationHubProps {
   currentUser: User;
@@ -46,6 +47,24 @@ const seedConstraints: Constraint[] = [
 
 const scoreIdea = (idea: InnovationIdea) => (idea.impact * 2) + (6 - idea.effort);
 
+const normalizeIdea = (row: any): InnovationIdea => ({
+  id: String(row.id),
+  title: String(row.title || ''),
+  area: String(row.area || 'Productivity'),
+  impact: Number(row.impact || 3),
+  effort: Number(row.effort || 3),
+  status: (row.status || 'idea') as IdeaStatus,
+  createdAt: String(row.created_at || row.createdAt || new Date().toISOString())
+});
+
+const normalizeConstraint = (row: any): Constraint => ({
+  id: String(row.id),
+  title: String(row.title || ''),
+  owner: String(row.owner || 'Site'),
+  severity: (row.severity || 'medium') as Constraint['severity'],
+  resolved: Boolean(row.resolved)
+});
+
 const ConstructionInnovationHub: React.FC<ConstructionInnovationHubProps> = ({
   currentUser,
   project,
@@ -65,11 +84,24 @@ const ConstructionInnovationHub: React.FC<ConstructionInnovationHubProps> = ({
       return seedIdeas;
     }
   });
-  const [constraints, setConstraints] = useState<Constraint[]>(seedConstraints);
+  const [constraints, setConstraints] = useState<Constraint[]>(() => {
+    if (typeof window === 'undefined') return seedConstraints;
+    try {
+      const stored = window.localStorage.getItem(storageKey + ':constraints');
+      return stored ? JSON.parse(stored) : seedConstraints;
+    } catch {
+      return seedConstraints;
+    }
+  });
+  const [syncState, setSyncState] = useState<'syncing' | 'synced' | 'offline'>('syncing');
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState('');
   const [draftArea, setDraftArea] = useState('Productivity');
   const [draftImpact, setDraftImpact] = useState(4);
   const [draftEffort, setDraftEffort] = useState(2);
+  const [draftConstraint, setDraftConstraint] = useState('');
+  const [draftConstraintOwner, setDraftConstraintOwner] = useState('Site');
+  const [draftConstraintSeverity, setDraftConstraintSeverity] = useState<Constraint['severity']>('medium');
   const [plannedUnits, setPlannedUnits] = useState(120);
   const [installedUnits, setInstalledUnits] = useState(94);
   const [crewSize, setCrewSize] = useState(6);
@@ -77,7 +109,55 @@ const ConstructionInnovationHub: React.FC<ConstructionInnovationHubProps> = ({
   useEffect(() => {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(storageKey, JSON.stringify(ideas));
-  }, [ideas, storageKey]);
+    window.localStorage.setItem(storageKey + ':constraints', JSON.stringify(constraints));
+    window.localStorage.setItem(storageKey + ':productivity', JSON.stringify({
+      plannedUnits,
+      installedUnits,
+      crewSize
+    }));
+  }, [ideas, constraints, plannedUnits, installedUnits, crewSize, storageKey]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const stored = window.localStorage.getItem(storageKey + ':productivity');
+      if (!stored) return;
+      const snapshot = JSON.parse(stored);
+      if (Number.isFinite(Number(snapshot.plannedUnits))) setPlannedUnits(Number(snapshot.plannedUnits));
+      if (Number.isFinite(Number(snapshot.installedUnits))) setInstalledUnits(Number(snapshot.installedUnits));
+      if (Number.isFinite(Number(snapshot.crewSize))) setCrewSize(Number(snapshot.crewSize));
+    } catch {
+      // Keep safe defaults when offline cache is malformed.
+    }
+  }, [storageKey]);
+
+  useEffect(() => {
+    let active = true;
+    setSyncState('syncing');
+
+    apiClient.fetchInnovationOverview(project?.id)
+      .then((data) => {
+        if (!active) return;
+        setIdeas(Array.isArray(data?.ideas) ? data.ideas.map(normalizeIdea) : []);
+        setConstraints(Array.isArray(data?.constraints) ? data.constraints.map(normalizeConstraint) : []);
+
+        const latest = Array.isArray(data?.productivity) ? data.productivity[0] : null;
+        if (latest) {
+          setPlannedUnits(Number(latest.planned_units || 0));
+          setInstalledUnits(Number(latest.installed_units || 0));
+          setCrewSize(Number(latest.crew_size || 0));
+          setLastSavedAt(String(latest.created_at || latest.work_date || ''));
+        }
+        setSyncState('synced');
+      })
+      .catch(() => {
+        if (active) setSyncState('offline');
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [project?.id]);
 
   const productivity = plannedUnits > 0 ? Math.round((installedUnits / plannedUnits) * 100) : 0;
   const unitsPerPerson = crewSize > 0 ? (installedUnits / crewSize).toFixed(1) : '0.0';
@@ -85,28 +165,122 @@ const ConstructionInnovationHub: React.FC<ConstructionInnovationHubProps> = ({
   const provenCount = ideas.filter(item => item.status === 'proven').length;
   const bestIdea = [...ideas].sort((a, b) => scoreIdea(b) - scoreIdea(a))[0];
 
-  const addIdea = (event: React.FormEvent) => {
+  const addIdea = async (event: React.FormEvent) => {
     event.preventDefault();
     const title = draftTitle.trim();
     if (!title) return;
-    setIdeas(current => [{
-      id: 'idea-' + Date.now(),
+
+    const optimistic: InnovationIdea = {
+      id: 'local-' + Date.now(),
       title,
       area: draftArea,
       impact: draftImpact,
       effort: draftEffort,
       status: 'idea',
       createdAt: new Date().toISOString()
-    }, ...current]);
+    };
+
+    setIdeas(current => [optimistic, ...current]);
     setDraftTitle('');
+
+    try {
+      const saved = await apiClient.createInnovationIdea({
+        project_id: project?.id || null,
+        title,
+        area: draftArea,
+        impact: draftImpact,
+        effort: draftEffort
+      });
+      setIdeas(current => current.map(item => item.id === optimistic.id ? normalizeIdea(saved) : item));
+      setSyncState('synced');
+    } catch {
+      setSyncState('offline');
+    }
   };
 
-  const moveIdea = (id: string) => {
-    setIdeas(current => current.map(item => {
-      if (item.id !== id) return item;
-      const next: IdeaStatus = item.status === 'idea' ? 'pilot' : item.status === 'pilot' ? 'proven' : 'proven';
-      return { ...item, status: next };
-    }));
+  const moveIdea = async (id: string) => {
+    const idea = ideas.find(item => item.id === id);
+    if (!idea) return;
+    const next: IdeaStatus = idea.status === 'idea' ? 'pilot' : idea.status === 'pilot' ? 'proven' : 'proven';
+    setIdeas(current => current.map(item => item.id === id ? { ...item, status: next } : item));
+
+    if (id.startsWith('local-') || id.startsWith('seed-')) {
+      setSyncState('offline');
+      return;
+    }
+
+    try {
+      const saved = await apiClient.updateInnovationIdea(id, { status: next });
+      setIdeas(current => current.map(item => item.id === id ? normalizeIdea(saved) : item));
+      setSyncState('synced');
+    } catch {
+      setSyncState('offline');
+    }
+  };
+
+  const addConstraint = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const title = draftConstraint.trim();
+    if (!title) return;
+
+    const optimistic: Constraint = {
+      id: 'local-constraint-' + Date.now(),
+      title,
+      owner: draftConstraintOwner.trim() || 'Site',
+      severity: draftConstraintSeverity,
+      resolved: false
+    };
+
+    setConstraints(current => [optimistic, ...current]);
+    setDraftConstraint('');
+
+    try {
+      const saved = await apiClient.createInnovationConstraint({
+        project_id: project?.id || null,
+        title,
+        owner: optimistic.owner,
+        severity: optimistic.severity
+      });
+      setConstraints(current => current.map(item => item.id === optimistic.id ? normalizeConstraint(saved) : item));
+      setSyncState('synced');
+    } catch {
+      setSyncState('offline');
+    }
+  };
+
+  const toggleConstraint = async (item: Constraint) => {
+    const resolved = !item.resolved;
+    setConstraints(current => current.map(c => c.id === item.id ? { ...c, resolved } : c));
+
+    if (item.id.startsWith('local-') || item.id.startsWith('c-')) {
+      setSyncState('offline');
+      return;
+    }
+
+    try {
+      const saved = await apiClient.updateInnovationConstraint(item.id, { resolved });
+      setConstraints(current => current.map(c => c.id === item.id ? normalizeConstraint(saved) : c));
+      setSyncState('synced');
+    } catch {
+      setSyncState('offline');
+    }
+  };
+
+  const saveProductivitySnapshot = async () => {
+    try {
+      const saved = await apiClient.saveInnovationProductivity({
+        project_id: project?.id || null,
+        work_date: new Date().toISOString().slice(0, 10),
+        planned_units: plannedUnits,
+        installed_units: installedUnits,
+        crew_size: crewSize,
+        unit_label: 'units'
+      });
+      setLastSavedAt(String(saved?.created_at || new Date().toISOString()));
+      setSyncState('synced');
+    } catch {
+      setSyncState('offline');
+    }
   };
 
   const quickLaunches: Array<{ label: string; description: string; screen: Screen; icon: React.ComponentType<any> }> = [
@@ -137,9 +311,23 @@ const ConstructionInnovationHub: React.FC<ConstructionInnovationHubProps> = ({
         <div className="absolute -bottom-24 left-1/3 h-64 w-64 rounded-full bg-violet-500/20 blur-3xl" />
         <div className="relative grid gap-8 lg:grid-cols-[1.4fr_0.6fr] lg:items-end">
           <div>
-            <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200">
-              <HardHat className="h-4 w-4" />
-              Construction Innovation OS
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200">
+                <HardHat className="h-4 w-4" />
+                Construction Innovation OS
+              </div>
+              <div className={'inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-bold ' + (
+                syncState === 'synced'
+                  ? 'bg-emerald-400/15 text-emerald-200'
+                  : syncState === 'syncing'
+                    ? 'bg-amber-400/15 text-amber-200'
+                    : 'bg-slate-400/15 text-slate-300'
+              )}>
+                <span className={'h-2 w-2 rounded-full ' + (
+                  syncState === 'synced' ? 'bg-emerald-300' : syncState === 'syncing' ? 'bg-amber-300' : 'bg-slate-400'
+                )} />
+                {syncState === 'synced' ? 'Shared live' : syncState === 'syncing' ? 'Syncing' : 'Offline cache'}
+              </div>
             </div>
             <h1 className="max-w-4xl text-3xl font-black tracking-tight sm:text-5xl">
               Turn field friction into measurable improvement.
@@ -214,6 +402,15 @@ const ConstructionInnovationHub: React.FC<ConstructionInnovationHubProps> = ({
             <span className="text-slate-500">Daily plan progress</span>
             <span className="font-bold text-slate-950">{productivity}%</span>
           </div>
+          <button
+            type="button"
+            onClick={saveProductivitySnapshot}
+            className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-600 px-4 py-3 text-sm font-bold text-white transition hover:bg-cyan-700"
+          >
+            <CheckCircle2 className="h-4 w-4" />
+            Save today&apos;s snapshot
+          </button>
+          {lastSavedAt && <p className="mt-2 text-center text-xs text-slate-400">Last shared snapshot: {new Date(lastSavedAt).toLocaleString()}</p>}
         </div>
 
         <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -224,12 +421,38 @@ const ConstructionInnovationHub: React.FC<ConstructionInnovationHubProps> = ({
               <p className="text-sm text-slate-500">Make blockers visible before they become delay.</p>
             </div>
           </div>
-          <div className="mt-5 space-y-3">
+          <form onSubmit={addConstraint} className="mt-5 grid gap-2 rounded-2xl bg-slate-50 p-3 sm:grid-cols-[1fr_120px_110px_auto]">
+            <input
+              value={draftConstraint}
+              onChange={event => setDraftConstraint(event.target.value)}
+              placeholder="Add a site blocker..."
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none ring-emerald-500 focus:ring-2"
+            />
+            <input
+              value={draftConstraintOwner}
+              onChange={event => setDraftConstraintOwner(event.target.value)}
+              placeholder="Owner"
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none ring-emerald-500 focus:ring-2"
+            />
+            <select
+              value={draftConstraintSeverity}
+              onChange={event => setDraftConstraintSeverity(event.target.value as Constraint['severity'])}
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
+            >
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+            <button type="submit" className="rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-bold text-white hover:bg-slate-800">
+              Add blocker
+            </button>
+          </form>
+          <div className="mt-4 space-y-3">
             {constraints.map(item => (
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setConstraints(current => current.map(c => c.id === item.id ? { ...c, resolved: !c.resolved } : c))}
+                onClick={() => toggleConstraint(item)}
                 className="flex w-full items-center gap-3 rounded-2xl border border-slate-100 p-4 text-left transition hover:border-slate-300"
               >
                 {item.resolved ? <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-500" /> : <TriangleAlert className="h-5 w-5 shrink-0 text-amber-500" />}

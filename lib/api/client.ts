@@ -17,7 +17,8 @@ const API_BASE = isProd()
  * Get authentication token from localStorage
  */
 const getAuthToken = (): string => {
-    return localStorage.getItem('token') ||
+    return localStorage.getItem('authToken') ||
+           localStorage.getItem('token') ||
            localStorage.getItem('constructai_token') ||
            '';
 };
@@ -537,6 +538,54 @@ export const apiClient = {
         });
     },
 
+    // ==================== CONSTRUCTION INNOVATION ====================
+
+    async fetchInnovationOverview(projectId?: string): Promise<any> {
+        const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+        const response = await apiRequest<{ success: boolean; data: any }>(`/innovation${query}`);
+        return response.data;
+    },
+
+    async createInnovationIdea(payload: any): Promise<any> {
+        const response = await apiRequest<{ success: boolean; data: any }>('/innovation/ideas', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        });
+        return response.data;
+    },
+
+    async updateInnovationIdea(id: string, updates: any): Promise<any> {
+        const response = await apiRequest<{ success: boolean; data: any }>(`/innovation/ideas/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(updates),
+        });
+        return response.data;
+    },
+
+    async createInnovationConstraint(payload: any): Promise<any> {
+        const response = await apiRequest<{ success: boolean; data: any }>('/innovation/constraints', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        });
+        return response.data;
+    },
+
+    async updateInnovationConstraint(id: string, updates: any): Promise<any> {
+        const response = await apiRequest<{ success: boolean; data: any }>(`/innovation/constraints/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(updates),
+        });
+        return response.data;
+    },
+
+    async saveInnovationProductivity(payload: any): Promise<any> {
+        const response = await apiRequest<{ success: boolean; data: any }>('/innovation/productivity', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        });
+        return response.data;
+    },
+
     // ==================== UTILITY METHODS ====================
 
     /**
@@ -550,6 +599,7 @@ export const apiClient = {
      * Clear authentication token
      */
     clearAuth(): void {
+        localStorage.removeItem('authToken');
         localStorage.removeItem('token');
         localStorage.removeItem('constructai_token');
     },
