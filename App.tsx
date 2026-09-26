@@ -107,6 +107,7 @@ const TimeTrackingScreen = lazy(() => import('./components/screens/modules/TimeT
 const ProjectOperationsScreen = lazy(() => import('./components/screens/modules/ProjectOperationsScreen'));
 const FinancialManagementScreen = lazy(() => import('./components/screens/modules/FinancialManagementScreen'));
 const BusinessDevelopmentScreen = lazy(() => import('./components/screens/modules/BusinessDevelopmentScreen'));
+const ConstructionInnovationHub = lazy(() => import('./components/screens/ConstructionInnovationHub'));
 const AIAgentsMarketplaceScreen = lazy(() => import('./components/screens/modules/AIAgentsMarketplaceScreen'));
 
 // Developer & SDK screens
@@ -186,6 +187,7 @@ const SCREEN_COMPONENTS: Record<Screen, React.ComponentType<any>> = {
   'project-operations': ProjectOperationsScreen,
   'financial-management': FinancialManagementScreen,
   'business-development': BusinessDevelopmentScreen,
+  'innovation-hub': ConstructionInnovationHub,
   'ai-agents-marketplace': AIAgentsMarketplaceScreen,
   'developer-dashboard': DeveloperDashboardScreen,
   'automation-studio': ConstructionAutomationStudio,

@@ -99,6 +99,7 @@ const Sidebar: React.FC<SidebarProps> = ({ project, navigateTo, navigateToModule
     const allNavItems = [
         { label: 'My Projects', screen: 'projects', icon: BuildingOfficeIcon, permission: { subject: 'task', action: 'read' } }, // Simplified permission
         { label: 'My Day', screen: 'my-day', icon: SunIcon, permission: { subject: 'task', action: 'read' } },
+        { label: 'Innovation Hub', screen: 'innovation-hub', icon: WandSparklesIcon, permission: { subject: 'task', action: 'read' } },
         { label: 'Tasks', screen: 'tasks', icon: ListBulletIcon, permission: { subject: 'task', action: 'read' } },
         { label: 'Daily Logs', screen: 'daily-log', icon: ClipboardDocumentListIcon, permission: { subject: 'dailyLog', action: 'read' } },
         { label: 'Photos', screen: 'photos', icon: CameraIcon, permission: { subject: 'photo', action: 'read' } },
@@ -163,6 +164,12 @@ const Sidebar: React.FC<SidebarProps> = ({ project, navigateTo, navigateToModule
             label: 'Company Dashboard',
             screen: 'company-admin-dashboard',
             icon: BuildingOfficeIcon,
+            isModule: true
+        },
+        {
+            label: 'Innovation Hub',
+            screen: 'innovation-hub',
+            icon: WandSparklesIcon,
             isModule: true
         },
         {

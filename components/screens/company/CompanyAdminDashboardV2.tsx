@@ -120,6 +120,7 @@ const CompanyAdminDashboardV2 = React.memo(({
 
     // Field Operations
     const fieldOperations = [
+        { id: 'innovation-hub', title: 'Innovation Hub', icon: Sparkles, color: 'purple', count: 0, description: 'Field ideas, constraints & productivity' },
         { id: 'tasks', title: 'Tasks & Assignments', icon: CheckSquare, color: 'blue', count: 0, description: 'Task tracking' },
         { id: 'daily-logs', title: 'Daily Site Logs', icon: ClipboardList, color: 'green', count: 0, description: 'Daily reports' },
         { id: 'rfis', title: 'RFIs & Issues', icon: AlertTriangle, color: 'yellow', count: 0, description: 'Issue tracking' },
