@@ -39,7 +39,8 @@ async function applyMigrations() {
     '002_admin_platform_schema.sql',
     '002_create_super_admin.sql',
     '003_enhanced_rls_security.sql',
-    '20251031000000_phase_1_enterprise_core.sql'
+    '20251031000000_phase_1_enterprise_core.sql',
+    '20260926000100_construction_innovation.sql'
   ];
 
   for (const migrationFile of migrations) {
