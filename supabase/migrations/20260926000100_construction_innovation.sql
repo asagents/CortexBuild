@@ -91,17 +91,25 @@ CREATE POLICY innovation_productivity_tenant_isolation ON innovation_productivit
   USING (company_id = cortexbuild_current_company_id())
   WITH CHECK (company_id = cortexbuild_current_company_id());
 
+CREATE OR REPLACE FUNCTION cortexbuild_set_innovation_updated_at()
+RETURNS TRIGGER AS $
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$ LANGUAGE plpgsql;
+
 DROP TRIGGER IF EXISTS update_innovation_ideas_updated_at ON innovation_ideas;
 CREATE TRIGGER update_innovation_ideas_updated_at
   BEFORE UPDATE ON innovation_ideas
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+  FOR EACH ROW EXECUTE FUNCTION cortexbuild_set_innovation_updated_at();
 
 DROP TRIGGER IF EXISTS update_innovation_constraints_updated_at ON innovation_constraints;
 CREATE TRIGGER update_innovation_constraints_updated_at
   BEFORE UPDATE ON innovation_constraints
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+  FOR EACH ROW EXECUTE FUNCTION cortexbuild_set_innovation_updated_at();
 
 DROP TRIGGER IF EXISTS update_innovation_productivity_updated_at ON innovation_productivity;
 CREATE TRIGGER update_innovation_productivity_updated_at
   BEFORE UPDATE ON innovation_productivity
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+  FOR EACH ROW EXECUTE FUNCTION cortexbuild_set_innovation_updated_at();
