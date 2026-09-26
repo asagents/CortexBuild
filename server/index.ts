@@ -52,6 +52,7 @@ import { createIntegrationsRouter } from './routes/integrations';
 import { createAgentKitRouter } from './routes/agentkit';
 import { createWorkflowsRouter } from './routes/workflows';
 import { createAutomationsRouter } from './routes/automations';
+import { createInnovationRouter } from './routes/innovation';
 import { createMyApplicationsRouter } from './routes/my-applications';
 import createCodexMCPRoutes from './routes/codex-mcp.js';
 import { createSubscriptionService, SubscriptionService } from './services/subscription-service';
@@ -247,6 +248,10 @@ const startServer = async () => {
         // initDatabase();
         console.log('✅ Supabase connection verified');
 
+        // Initialize authentication middleware with the server-side Supabase client.
+        // Without this, authenticated routers cannot resolve the current user.
+        auth.setDatabase(supabase);
+
         // Initialize subscription service
         console.log('💳 Initializing Subscription service...');
         const subscriptionService = createSubscriptionService(supabase);
@@ -370,6 +375,9 @@ const startServer = async () => {
 
         app.use('/api/tasks', generalRateLimit, createTasksRouter(supabase));
         console.log('  ✓ /api/tasks');
+
+        app.use('/api/innovation', generalRateLimit, createInnovationRouter(supabase));
+        console.log('  ✓ /api/innovation');
 
         app.use('/api/milestones', generalRateLimit, createMilestonesRouter(supabase));
         console.log('  ✓ /api/milestones');
